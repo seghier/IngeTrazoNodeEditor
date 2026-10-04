@@ -158,6 +158,8 @@ class MeshData:
     name: str = "ParametricMesh"
     layer: Optional[str] = None
     material: Optional[str] = None
+    terrain_obj: Optional[Any] = None
+    is_terrain: bool = False
 
     def merge(self, other: MeshData) -> MeshData:
         return MeshData(
@@ -165,7 +167,9 @@ class MeshData:
             edges=self.edges + other.edges,
             name=self.name,
             layer=self.layer or other.layer,
-            material=self.material or other.material
+            material=self.material or other.material,
+            terrain_obj=self.terrain_obj or other.terrain_obj,
+            is_terrain=self.is_terrain or other.is_terrain
         )
 
     def translated(self, v: Vector3D) -> MeshData:
@@ -183,7 +187,15 @@ class MeshData:
             EdgeData(a=e.a.translated(v), b=e.b.translated(v), soft=e.soft, hidden=e.hidden, layer=e.layer)
             for e in self.edges
         ]
-        return MeshData(faces=new_faces, edges=new_edges, name=self.name, layer=self.layer, material=self.material)
+        return MeshData(
+            faces=new_faces,
+            edges=new_edges,
+            name=self.name,
+            layer=self.layer,
+            material=self.material,
+            terrain_obj=self.terrain_obj,
+            is_terrain=self.is_terrain
+        )
 
     def rotated_z(self, angle_deg: float, origin: Optional[Point3D] = None) -> MeshData:
         new_faces = [
@@ -200,7 +212,15 @@ class MeshData:
             EdgeData(a=e.a.rotated_z(angle_deg, origin), b=e.b.rotated_z(angle_deg, origin), soft=e.soft, hidden=e.hidden, layer=e.layer)
             for e in self.edges
         ]
-        return MeshData(faces=new_faces, edges=new_edges, name=self.name, layer=self.layer, material=self.material)
+        return MeshData(
+            faces=new_faces,
+            edges=new_edges,
+            name=self.name,
+            layer=self.layer,
+            material=self.material,
+            terrain_obj=self.terrain_obj,
+            is_terrain=self.is_terrain
+        )
 
     def scaled(self, factor: float, origin: Optional[Point3D] = None) -> MeshData:
         new_faces = [
@@ -217,7 +237,15 @@ class MeshData:
             EdgeData(a=e.a.scaled(factor, origin), b=e.b.scaled(factor, origin), soft=e.soft, hidden=e.hidden, layer=e.layer)
             for e in self.edges
         ]
-        return MeshData(faces=new_faces, edges=new_edges, name=self.name, layer=self.layer, material=self.material)
+        return MeshData(
+            faces=new_faces,
+            edges=new_edges,
+            name=self.name,
+            layer=self.layer,
+            material=self.material,
+            terrain_obj=self.terrain_obj,
+            is_terrain=self.is_terrain
+        )
 
 
 # -------------------------------------------------------------------------------------

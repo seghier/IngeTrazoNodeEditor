@@ -85,7 +85,7 @@ class NodeEditorWidget(QWidget):
         # Run button
         btn_run = QPushButton("⚡ Evaluate")
         btn_run.setToolTip("Execute the graph now (F5)")
-        btn_run.clicked.connect(self.run_evaluation)
+        btn_run.clicked.connect(lambda: self.run_evaluation(force_all=True))
         toolbar.addWidget(btn_run)
 
         toolbar.addSeparator()
@@ -271,9 +271,9 @@ class NodeEditorWidget(QWidget):
             if not getattr(self.inspector, "is_pinned", False):
                 self.inspector.hide()
 
-    def run_evaluation(self) -> None:
+    def run_evaluation(self, force_all: bool = False) -> None:
         context = {"app": self.app}
-        elapsed_ms = self.graph.evaluate(context=context)
+        elapsed_ms = self.graph.evaluate(context=context, force_all=force_all)
         self.lbl_stats.setText(
             f"Nodes: {len(self.graph.nodes)} | Connections: {len(self.graph.connections)} | Solve: {elapsed_ms:.1f} ms"
         )

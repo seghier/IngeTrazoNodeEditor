@@ -604,6 +604,10 @@ class NodeItem(QGraphicsObject):
                     if p and os.path.exists(p):
                         qimg = QImage(p)
 
+                if getattr(lbl_pix, "_last_qimg", None) is qimg and qimg is not None:
+                    return
+                lbl_pix._last_qimg = qimg
+
                 if qimg and not qimg.isNull():
                     pix = QPixmap.fromImage(qimg).scaled(lbl_pix.width() - 4, lbl_pix.height() - 4, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                     lbl_pix.setPixmap(pix)

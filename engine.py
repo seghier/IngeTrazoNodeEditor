@@ -133,9 +133,25 @@ class NodeBase:
         self.inputs: List[Port] = []
         self.outputs: List[Port] = []
         self.widget_values: Dict[str, Any] = {}
-        self.dirty: bool = True
+        self._dirty: bool = True
         self.error: Optional[str] = None
+        self.graph: Optional['NodeGraph'] = None
         self.setup_ports()
+
+    @property
+    def dirty(self) -> bool:
+        return self._dirty
+
+    @dirty.setter
+    def dirty(self, val: bool) -> None:
+        self._dirty = val
+        if val and self.graph is not None:
+            self.graph.mark_dirty(self)
+
+    def mark_dirty(self) -> None:
+        self._dirty = True
+        if self.graph is not None:
+            self.graph.mark_dirty(self)
 
     def setup_ports(self) -> None:
         """Override to add input and output ports."""
@@ -291,8 +307,26 @@ class NodeGraph:
         self.listeners: List[Callable[[], None]] = []
         self.is_evaluating: bool = False
 
+    def mark_dirty(self, start_node: NodeBase) -> None:
+        """Mark start_node and all its downstream dependent nodes as dirty."""
+        visited = set()
+        queue = [start_node]
+        while queue:
+            curr = queue.pop(0)
+            if curr in visited:
+                continue
+            visited.add(curr)
+            curr._dirty = True
+            for out_port in curr.outputs:
+                for conn in out_port.connections:
+                    target = conn.target.node
+                    if target not in visited:
+                        queue.append(target)
+
     def add_node(self, node: NodeBase) -> NodeBase:
         if node not in self.nodes:
+            node.graph = self
+            node._dirty = True
             self.nodes.append(node)
             self.notify_changed()
         return node
@@ -304,6 +338,7 @@ class NodeGraph:
                 if conn.source.node == node or conn.target.node == node:
                     self.disconnect(conn.source, conn.target)
             self.nodes.remove(node)
+            node.graph = None
             self.notify_changed()
 
     def connect(self, source_port: Port, target_port: Port, append: bool = False) -> Optional[Connection]:
@@ -326,7 +361,7 @@ class NodeGraph:
         source_port.connections.append(conn)
         target_port.connections.append(conn)
         self.connections.append(conn)
-        target_port.node.dirty = True
+        self.mark_dirty(target_port.node)
         self.notify_changed()
         return conn
 
@@ -338,7 +373,7 @@ class NodeGraph:
                 if conn in target_port.connections:
                     target_port.connections.remove(conn)
                 self.connections.remove(conn)
-                target_port.node.dirty = True
+                self.mark_dirty(target_port.node)
                 self.notify_changed()
                 break
 
@@ -379,17 +414,23 @@ class NodeGraph:
 
         return sorted_nodes
 
-    def evaluate(self, context: Optional[Dict[str, Any]] = None) -> float:
+    def evaluate(self, context: Optional[Dict[str, Any]] = None, force_all: bool = False) -> float:
         """Execute the graph in topological order. Returns elapsed ms."""
         t0 = time.perf_counter()
         self.is_evaluating = True
 
         order = self.topological_sort()
         for node in order:
+            if not force_all and not node._dirty:
+                continue
+
             node.error = None
             try:
                 node.compute(context=context)
-                node.dirty = False
+                node._dirty = False
+                for out_port in node.outputs:
+                    for conn in out_port.connections:
+                        conn.target.node._dirty = True
             except Exception as ex:
                 node.error = str(ex)
                 log.warning(f"Error computing node {node.name} ({node.id}): {ex}")
@@ -416,6 +457,8 @@ class NodeGraph:
             if cls:
                 node = cls(node_id=nd.get("id"))
                 node.deserialize(nd)
+                node.graph = self
+                node._dirty = True
                 self.nodes.append(node)
                 id_map[node.id] = node
 

@@ -151,7 +151,7 @@ class NodeItem(QGraphicsObject):
         return t in (
             "NumberSliderNode", "IntegerSliderNode", "ToggleNode",
             "StringNode", "ExpressionNode", "PanelNode", "ReferenceFaceNode",
-            "ImageFileNode", "ImagePreviewNode", "ImageSamplerNode"
+            "ImageFileNode", "ImagePreviewNode", "ImageSamplerNode", "IngeTrazoOutputNode"
         )
 
     def add_embedded_widget(self) -> None:
@@ -670,6 +670,56 @@ class NodeItem(QGraphicsObject):
                 btn_open.clicked.connect(on_sampler_browse)
                 btn_inv.clicked.connect(on_sampler_inv)
                 btn_tex.clicked.connect(on_sampler_tex)
+
+        elif t == "IngeTrazoOutputNode":
+            layout = QHBoxLayout(container)
+            layout.setContentsMargins(8, 2, 8, 4)
+            layout.setSpacing(6)
+
+            btn_tex = QPushButton("🖼 Texture")
+            btn_tex.setCursor(Qt.PointingHandCursor)
+            btn_tex.setCheckable(True)
+            btn_tex.setChecked(bool(self.node.widget_values.get("Texture", self.node.widget_values.get("texture", True))))
+            btn_tex.setStyleSheet("""
+                QPushButton {
+                    background: #3b4252; color: #eceff4; border: 1px solid #4c566a;
+                    border-radius: 4px; padding: 4px 6px; font-size: 10px; font-weight: bold;
+                }
+                QPushButton:checked { background: #a3be8c; color: #1e222b; font-weight: bold; }
+                QPushButton:hover { border-color: #a3be8c; }
+            """)
+
+            btn_bake = QPushButton("🚀 Bake")
+            btn_bake.setCursor(Qt.PointingHandCursor)
+            btn_bake.setStyleSheet("""
+                QPushButton {
+                    background: #bf616a; color: #ffffff; border: 1px solid #d08770;
+                    border-radius: 4px; padding: 4px 6px; font-size: 10px; font-weight: bold;
+                }
+                QPushButton:hover { background: #d08770; color: #ffffff; }
+                QPushButton:pressed { background: #a34e56; }
+            """)
+
+            def on_out_tex():
+                val = btn_tex.isChecked()
+                self.node.widget_values["Texture"] = val
+                self.node.widget_values["texture"] = val
+                self.node.dirty = True
+                if self.scene():
+                    self.scene().notify_graph_changed()
+
+            def on_out_bake():
+                app = getattr(self.scene(), "app", None) if hasattr(self.scene(), "app") else None
+                if app is None and self.scene() and self.scene().views():
+                    win = self.scene().views()[0].window()
+                    app = getattr(win, "app", None) if win else None
+                if app:
+                    self.node.bake(app, is_live=False)
+
+            btn_tex.clicked.connect(on_out_tex)
+            btn_bake.clicked.connect(on_out_bake)
+            layout.addWidget(btn_tex, 1)
+            layout.addWidget(btn_bake, 1)
 
         self.widget_proxy = proxy
         proxy.setWidget(container)

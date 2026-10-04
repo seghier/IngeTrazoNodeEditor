@@ -2604,7 +2604,12 @@ class IngeTrazoOutputNode(NodeBase):
 
     def compute(self, context: Optional[Dict[str, Any]] = None) -> None:
         geom = self.get_input("Geometry")
-        use_texture = bool(self.get_input("Texture", True))
+        port_tex = next((p for p in self.inputs if p.name == "Texture"), None)
+        if port_tex and port_tex.has_connection:
+            use_texture = bool(self.get_input("Texture", True))
+        else:
+            use_texture = bool(self.widget_values.get("Texture", self.widget_values.get("texture", True)))
+
         grp_name = str(self.get_input("Group Name", "ParametricModel"))
         layer_name = str(self.get_input("Layer", "Layer 0"))
         mat_name = str(self.get_input("Material", ""))
@@ -2622,7 +2627,12 @@ class IngeTrazoOutputNode(NodeBase):
             mesh.terrain_obj = terrain_obj
             mesh.is_terrain = True
 
-        if not use_texture:
+        # Check if texture is disabled either by toggle or by source
+        source_has_no_tex = (terrain_obj is not None and getattr(terrain_obj, "texture_image", None) is None) or (
+            mesh is not None and getattr(mesh, "texture_image", None) is None and getattr(mesh, "is_terrain", False)
+        )
+
+        if not use_texture or source_has_no_tex:
             if terrain_obj is not None:
                 terrain_obj.texture_image = None
             if mesh is not None:
@@ -2676,14 +2686,145 @@ class IngeTrazoOutputNode(NodeBase):
             if not scene:
                 return
 
-            # Clear any flat temporary terrain layer so the 3D shaded model renders
-            if getattr(scene, "terrain", None) is not None:
+            def _next_unique_name(sc, base):
+                used = {g.name for g in getattr(sc, "groups", [])}
+                if base not in used:
+                    return base
+                n = 2
+                while f"{base} {n}" in used:
+                    n += 1
+                return f"{base} {n}"
+
+            grp_name = (mesh_data.name if mesh_data else None) or "ParametricModel"
+            layer_name = (mesh_data.layer if mesh_data else None) or "Layer 0"
+            mat_name = mesh_data.material if mesh_data else ""
+
+            # Check live texture toggle
+            port_tex = next((p for p in self.inputs if p.name == "Texture"), None)
+            if port_tex and port_tex.has_connection:
+                use_texture = bool(self.get_input("Texture", True))
+            else:
+                use_texture = bool(self.widget_values.get("Texture", self.widget_values.get("texture", True)))
+
+            # =========================================================================
+            # CASE A: TERRAIN / IMAGE SAMPLER (Virtual GPU Streaming at 120 FPS)
+            # =========================================================================
+            if terrain_obj is not None:
+                if is_live:
+                    # Remove any leftover B-Rep groups created by this node
+                    sc_groups = getattr(scene, "groups", [])
+                    to_remove = [g for g in sc_groups if isinstance(getattr(g, "ext", None), dict) and g.ext.get("node_editor_id") == self.id]
+                    if to_remove:
+                        for g in to_remove:
+                            sc_groups.remove(g)
+                        scene.version += 1
+
+                    if not use_texture:
+                        terrain_obj.texture_image = None
+
+                    first_terrain = scene.terrain is None
+                    scene.terrain = terrain_obj
+                    viewport.upload_terrain(terrain_obj)
+                    self._is_terrain_active = True
+
+                    if first_terrain and hasattr(terrain_obj, "bounds"):
+                        mn, mx = terrain_obj.bounds()
+                        if mn is not None and hasattr(viewport, "camera") and hasattr(viewport.camera, "fit_to"):
+                            viewport.camera.fit_to(mn, mx)
+
+                    viewport.update()
+                    return
+
+                else:
+                    # MANUAL BAKE: Commit terrain into permanent scene.groups
+                    scene.terrain = None
+                    viewport.upload_terrain(None)
+                    self._is_terrain_active = False
+
+                    baked_name = _next_unique_name(scene, grp_name)
+                    native_mesh = Mesh()
+
+                    try:
+                        import numpy as np
+                    except ImportError:
+                        np = None
+
+                    if np is not None and mesh_data and len(mesh_data.faces) > 0:
+                        raw_pos = []
+                        sizes = []
+                        attrs = []
+                        for f in mesh_data.faces:
+                            if len(f.vertices) < 3:
+                                continue
+                            sizes.append(len(f.vertices))
+                            for p in f.vertices:
+                                raw_pos.append((float(p.x), float(p.y), float(p.z)))
+                            att = {}
+                            if f.color:
+                                att["color"] = list(f.color)
+                            if mat_name:
+                                att["mat"] = mat_name
+                            if layer_name:
+                                att["layer"] = layer_name
+                            attrs.append(att if att else None)
+
+                        pos_arr = np.asarray(raw_pos, dtype=float)
+                        sizes_arr = np.asarray(sizes, dtype=np.int64)
+                        native_mesh.add_faces_bulk(
+                            np.ascontiguousarray(pos_arr, dtype=float),
+                            sizes_arr,
+                            np.ones(len(sizes_arr), dtype=np.int64),
+                            attrs=attrs if any(attrs) else None
+                        )
+                        for e in native_mesh.edges:
+                            e.soft = True
+                    elif mesh_data:
+                        for f in mesh_data.faces:
+                            if len(f.vertices) >= 3:
+                                pts = [QVector3D(float(p.x), float(p.y), float(p.z)) for p in f.vertices]
+                                fn = native_mesh.add_face(pts)
+                                if f.color and fn and getattr(fn, "attrs", None) is not None:
+                                    fn.attrs["color"] = list(f.color)
+                        for e in native_mesh.edges:
+                            e.soft = True
+
+                    native_mesh._chunk_dirty = True
+                    native_mesh._mut_serial += 1
+
+                    baked_group = Group(native_mesh, name=baked_name)
+                    baked_group.component = False
+                    if layer_name:
+                        baked_group.layer = layer_name
+                    if mat_name:
+                        baked_group.material = mat_name
+
+                    def do_bake_terrain(sc):
+                        sc.groups.append(baked_group)
+                        sc.version += 1
+
+                    if hasattr(viewport, "history") and hasattr(viewport.history, "execute"):
+                        viewport.history.execute(SnapshotImport(do_bake_terrain))
+                    else:
+                        do_bake_terrain(scene)
+
+                    notify = getattr(viewport, "notify_scene_changed", None)
+                    if callable(notify):
+                        notify()
+                    viewport.update()
+                    if hasattr(viewport, "flash_status"):
+                        viewport.flash_status(f"Baked terrain '{baked_name}' to IngeTrazo", 3000)
+                    return
+
+            # =========================================================================
+            # CASE B: REGULAR B-REP MESHES (Mesh from Points, Extrusions, Solids...)
+            # =========================================================================
+            # Clear virtual terrain if previously active
+            if getattr(self, "_is_terrain_active", False) or getattr(scene, "terrain", None) is not None:
                 scene.terrain = None
                 viewport.upload_terrain(None)
-            self._is_terrain_active = False
+                self._is_terrain_active = False
 
             if not mesh_data or (not mesh_data.faces and not mesh_data.edges):
-                # Clean up any leftover group for this node
                 sc_groups = getattr(scene, "groups", [])
                 to_remove = [g for g in sc_groups if isinstance(getattr(g, "ext", None), dict) and g.ext.get("node_editor_id") == self.id]
                 if to_remove:
@@ -2693,81 +2834,36 @@ class IngeTrazoOutputNode(NodeBase):
                     viewport.update()
                 return
 
-            grp_name = mesh_data.name or "ParametricModel"
-            layer_name = mesh_data.layer or "Layer 0"
-            mat_name = mesh_data.material
-
-            try:
-                import numpy as np
-            except ImportError:
-                np = None
-
+            # Construct clean B-Rep mesh with exact faces and sharp quad/tri wireframe edges
             native_mesh = Mesh()
-            has_holes = any(getattr(f, "holes", None) for f in mesh_data.faces)
+            for idx, face in enumerate(mesh_data.faces):
+                if len(face.vertices) < 3:
+                    continue
+                try:
+                    verts = [QVector3D(float(p.x), float(p.y), float(p.z)) for p in face.vertices]
+                    holes = (
+                        [[QVector3D(float(p.x), float(p.y), float(p.z)) for p in h] for h in face.holes]
+                        if face.holes else None
+                    )
+                    f = native_mesh.add_face(verts, holes)
+                    if f is not None and getattr(f, "attrs", None) is not None:
+                        if face.color:
+                            f.attrs["color"] = list(face.color)
+                        if mat_name:
+                            f.attrs["mat"] = mat_name
+                        if layer_name:
+                            f.attrs["layer"] = layer_name
+                except Exception:
+                    pass
 
-            # High-performance C/NumPy bulk mesh builder (same as topology_tool.py)
-            if np is not None and len(mesh_data.faces) > 0 and not has_holes:
-                raw_pos = []
-                sizes = []
-                attrs = []
-                for f in mesh_data.faces:
-                    n = len(f.vertices)
-                    if n < 3:
-                        continue
-                    sizes.append(n)
-                    for p in f.vertices:
-                        raw_pos.append((float(p.x), float(p.y), float(p.z)))
-                    att = {}
-                    if f.color:
-                        att["color"] = list(f.color)
-                    if mat_name:
-                        att["mat"] = mat_name
-                    if layer_name:
-                        att["layer"] = layer_name
-                    attrs.append(att if att else None)
-
-                pos_arr = np.asarray(raw_pos, dtype=float)
-                sizes_arr = np.asarray(sizes, dtype=np.int64)
-                native_mesh.add_faces_bulk(
-                    np.ascontiguousarray(pos_arr, dtype=float),
-                    sizes_arr,
-                    np.ones(len(sizes_arr), dtype=np.int64),
-                    attrs=attrs if any(attrs) else None
-                )
-            else:
-                for idx, face in enumerate(mesh_data.faces):
-                    if len(face.vertices) < 3:
-                        continue
-                    try:
-                        verts = [QVector3D(float(p.x), float(p.y), float(p.z)) for p in face.vertices]
-                        holes = (
-                            [[QVector3D(float(p.x), float(p.y), float(p.z)) for p in h] for h in face.holes]
-                            if face.holes else None
-                        )
-                        f = native_mesh.add_face(verts, holes)
-                        if f is not None and getattr(f, "attrs", None) is not None:
-                            if face.color:
-                                f.attrs["color"] = list(face.color)
-                            if mat_name:
-                                f.attrs["mat"] = mat_name
-                            if layer_name:
-                                f.attrs["layer"] = layer_name
-                    except Exception:
-                        pass
-
-            # Smooth edges for terrain / dense relief: hides wireframe clutter and enables smooth 3D sun shading at 120 FPS
-            if getattr(mesh_data, "is_terrain", False) or len(mesh_data.faces) > 50:
-                for e in native_mesh.edges:
-                    e.soft = True
-
-            # Add explicit edges if any
+            # Explicit edges (preserve custom soft flags if set, leave hard by default for Rhino-like wireframe)
             for edge in getattr(mesh_data, "edges", []):
                 try:
                     e = native_mesh.add_edge(
                         QVector3D(float(edge.a.x), float(edge.a.y), float(edge.a.z)),
                         QVector3D(float(edge.b.x), float(edge.b.y), float(edge.b.z))
                     )
-                    if e and edge.soft:
+                    if e and getattr(edge, "soft", False):
                         e.soft = True
                 except Exception:
                     pass
@@ -2776,7 +2872,6 @@ class IngeTrazoOutputNode(NodeBase):
             native_mesh._mut_serial += 1
 
             if is_live:
-                # Live preview updates or creates the ephemeral group keyed by node_editor_id
                 target_group = None
                 for g in getattr(scene, "groups", []):
                     ext = getattr(g, "ext", None)
@@ -2808,16 +2903,6 @@ class IngeTrazoOutputNode(NodeBase):
                 viewport.update()
 
             else:
-                # Manual Bake: Permanently commits a new Group into IngeTrazo
-                def _next_unique_name(sc, base):
-                    used = {g.name for g in getattr(sc, "groups", [])}
-                    if base not in used:
-                        return base
-                    n = 2
-                    while f"{base} {n}" in used:
-                        n += 1
-                    return f"{base} {n}"
-
                 baked_name = _next_unique_name(scene, grp_name)
                 baked_group = Group(native_mesh, name=baked_name)
                 baked_group.component = False
@@ -2826,14 +2911,14 @@ class IngeTrazoOutputNode(NodeBase):
                 if mat_name:
                     baked_group.material = mat_name
 
-                def do_bake(sc):
+                def do_bake_mesh(sc):
                     sc.groups.append(baked_group)
                     sc.version += 1
 
                 if hasattr(viewport, "history") and hasattr(viewport.history, "execute"):
-                    viewport.history.execute(SnapshotImport(do_bake))
+                    viewport.history.execute(SnapshotImport(do_bake_mesh))
                 else:
-                    do_bake(scene)
+                    do_bake_mesh(scene)
 
                 notify = getattr(viewport, "notify_scene_changed", None)
                 if callable(notify):
@@ -3638,142 +3723,4 @@ class ImageSamplerNode(NodeBase):
             except Exception:
                 pass
 
-
-@register_node
-class MeshFromPointsNode(NodeBase):
-    name = "Mesh From Points"
-    category = "Solids"
-    description = "Create a structured 3D quad surface mesh from an ordered 2D grid of 3D points."
-    header_color = "#b48ead"
-
-    def setup_ports(self) -> None:
-        self.add_input("Points", PortType.ANY, description="Grid points (List[Point3D])")
-        self.add_input("U Count", PortType.INTEGER, description="Points per row in U", default_value=10)
-        self.add_input("Closed U", PortType.BOOLEAN, description="Wrap mesh around U", default_value=False)
-        self.add_input("Closed V", PortType.BOOLEAN, description="Wrap mesh around V", default_value=False)
-        self.add_output("Mesh", PortType.MESH, "Generated 3D mesh")
-
-    def compute(self, context: Optional[Dict[str, Any]] = None) -> None:
-        raw_pts = self.get_input("Points", [])
-        u_count = int(self.get_input("U Count", 10))
-        closed_u = bool(self.get_input("Closed U", False))
-        closed_v = bool(self.get_input("Closed V", False))
-
-        if not raw_pts or u_count < 2:
-            return
-
-        pts: List[Point3D] = []
-        for p in raw_pts:
-            if isinstance(p, Point3D):
-                pts.append(p)
-            elif isinstance(p, (list, tuple)) and len(p) >= 3:
-                pts.append(Point3D(float(p[0]), float(p[1]), float(p[2])))
-
-        total = len(pts)
-        if total < u_count:
-            return
-
-        v_count = total // u_count
-        faces: List[FaceData] = []
-
-        num_u_segments = u_count if closed_u else (u_count - 1)
-        num_v_segments = v_count if closed_v else (v_count - 1)
-
-        for j in range(num_v_segments):
-            j_next = (j + 1) % v_count
-            for i in range(num_u_segments):
-                i_next = (i + 1) % u_count
-
-                idx00 = j * u_count + i
-                idx10 = j * u_count + i_next
-                idx11 = j_next * u_count + i_next
-                idx01 = j_next * u_count + i
-
-                p0 = pts[idx00]
-                p1 = pts[idx10]
-                p2 = pts[idx11]
-                p3 = pts[idx01]
-
-                faces.append(FaceData(vertices=[p0, p1, p2, p3], color=(0.85, 0.65, 0.3)))
-
-        terrain_obj = None
-        try:
-            from PySide6.QtGui import QVector3D
-            try:
-                from georef.terrain import TerrainObject
-            except ImportError:
-                TerrainObject = None
-
-            qv_points = [QVector3D(float(p.x), float(p.y), float(p.z)) for p in pts]
-            uv_tuples = [(i / float(u_count - 1), 1.0 - (j / float(v_count - 1))) for j in range(v_count) for i in range(u_count)]
-            
-            raw_floats = []
-            tri_tuples = []
-            for j in range(num_v_segments):
-                j_next = (j + 1) % v_count
-                for i in range(num_u_segments):
-                    i_next = (i + 1) % u_count
-                    idx00 = j * u_count + i
-                    idx10 = j * u_count + i_next
-                    idx11 = j_next * u_count + i_next
-                    idx01 = j_next * u_count + i
-                    p0 = pts[idx00]
-                    p1 = pts[idx10]
-                    p2 = pts[idx11]
-                    p3 = pts[idx01]
-                    raw_floats.extend([p0.x, p0.y, p0.z, uv_tuples[idx00][0], uv_tuples[idx00][1]])
-                    raw_floats.extend([p1.x, p1.y, p1.z, uv_tuples[idx10][0], uv_tuples[idx10][1]])
-                    raw_floats.extend([p2.x, p2.y, p2.z, uv_tuples[idx11][0], uv_tuples[idx11][1]])
-                    raw_floats.extend([p0.x, p0.y, p0.z, uv_tuples[idx00][0], uv_tuples[idx00][1]])
-                    raw_floats.extend([p2.x, p2.y, p2.z, uv_tuples[idx11][0], uv_tuples[idx11][1]])
-                    raw_floats.extend([p3.x, p3.y, p3.z, uv_tuples[idx01][0], uv_tuples[idx01][1]])
-                    tri_tuples.append((idx00, idx10, idx11))
-                    tri_tuples.append((idx00, idx11, idx01))
-
-            import numpy as np
-            vbo_bytes = np.array(raw_floats, dtype=np.float32).tobytes()
-            min_x, max_x = min(p.x for p in pts), max(p.x for p in pts)
-            min_y, max_y = min(p.y for p in pts), max(p.y for p in pts)
-
-            if TerrainObject is not None:
-                terrain_obj = TerrainObject(
-                    vertices=qv_points,
-                    uvs=uv_tuples,
-                    triangles=tri_tuples,
-                    tile_range=(0, 0, 1, 1, 0),
-                    nx=u_count,
-                    ny=v_count,
-                    bbox=(min_x, min_y, max_x, max_y)
-                )
-            else:
-                class FallbackTerrain:
-                    def __init__(self, verts, uvs_list, tri_list, nx, ny, bbox):
-                        self.vertices = verts
-                        self.uvs = uvs_list
-                        self.triangles = tri_list
-                        self.tile_range = (0, 0, 1, 1, 0)
-                        self.nx = nx
-                        self.ny = ny
-                        self.bbox = bbox
-                        self.visible = True
-                        self.texture_image = None
-                    def bounds(self):
-                        if not self.vertices:
-                            return None, None
-                        xs = [v.x() for v in self.vertices]
-                        ys = [v.y() for v in self.vertices]
-                        zs = [v.z() for v in self.vertices]
-                        return (QVector3D(min(xs), min(ys), min(zs)),
-                                QVector3D(max(xs), max(ys), max(zs)))
-                terrain_obj = FallbackTerrain(qv_points, uv_tuples, tri_tuples, u_count, v_count, (min_x, min_y, max_x, max_y))
-
-            terrain_obj._vbo_bytes = vbo_bytes
-            terrain_obj._vbo_count = len(raw_floats) // 5
-        except Exception:
-            pass
-
-        mesh = MeshData(faces=faces, name="GridMesh")
-        mesh.terrain_obj = terrain_obj
-        mesh.is_terrain = True
-        self.set_output("Mesh", mesh)
 

@@ -210,9 +210,12 @@ class NodeBase:
                         merged.append(val)
                 return merged if merged else fallback
 
-        # If disconnected, check widget value matching port name
+        # If disconnected, check widget value matching port name (exact or case-insensitive)
         if port.name in self.widget_values:
             return self.widget_values[port.name]
+        for k, v in self.widget_values.items():
+            if k.lower() == port.name.lower():
+                return v
 
         if port.value is not None:
             return port.value

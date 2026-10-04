@@ -574,7 +574,7 @@ class NodeItem(QGraphicsObject):
                 btn_inv = QPushButton("⇅ Invert")
                 btn_inv.setCursor(Qt.PointingHandCursor)
                 btn_inv.setCheckable(True)
-                btn_inv.setChecked(bool(self.node.widget_values.get("invert", False)))
+                btn_inv.setChecked(bool(self.node.widget_values.get("Invert", self.node.widget_values.get("invert", False))))
                 btn_inv.setStyleSheet("""
                     QPushButton {
                         background: #3b4252; color: #eceff4; border: 1px solid #4c566a;
@@ -586,7 +586,7 @@ class NodeItem(QGraphicsObject):
                 btn_tex = QPushButton("🖼 Texture")
                 btn_tex.setCursor(Qt.PointingHandCursor)
                 btn_tex.setCheckable(True)
-                btn_tex.setChecked(bool(self.node.widget_values.get("texture", True)))
+                btn_tex.setChecked(bool(self.node.widget_values.get("Texture", self.node.widget_values.get("texture", True))))
                 btn_tex.setStyleSheet("""
                     QPushButton {
                         background: #3b4252; color: #eceff4; border: 1px solid #4c566a;
@@ -652,13 +652,17 @@ class NodeItem(QGraphicsObject):
                             self.scene().notify_graph_changed()
 
                 def on_sampler_inv():
-                    self.node.widget_values["invert"] = btn_inv.isChecked()
+                    val = btn_inv.isChecked()
+                    self.node.widget_values["Invert"] = val
+                    self.node.widget_values["invert"] = val
                     self.node.dirty = True
                     if self.scene():
                         self.scene().notify_graph_changed()
 
                 def on_sampler_tex():
-                    self.node.widget_values["texture"] = btn_tex.isChecked()
+                    val = btn_tex.isChecked()
+                    self.node.widget_values["Texture"] = val
+                    self.node.widget_values["texture"] = val
                     self.node.dirty = True
                     if self.scene():
                         self.scene().notify_graph_changed()

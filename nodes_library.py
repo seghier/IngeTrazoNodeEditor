@@ -2715,8 +2715,8 @@ class IngeTrazoOutputNode(NodeBase):
                 except Exception:
                     pass
 
-            # 1. LIVE TERRAIN STREAMING (Hardware-accelerated OpenGL VBO, zero CPU orbit lag)
-            if is_live and terrain_obj is not None:
+            # 1. TERRAIN STREAMING / BAKING (Hardware-accelerated OpenGL VBO, zero CPU orbit lag)
+            if terrain_obj is not None:
                 # Remove any existing B-Rep group from scene.groups
                 sc_groups = getattr(scene, "groups", [])
                 to_remove = [g for g in sc_groups if isinstance(getattr(g, "ext", None), dict) and g.ext.get("node_editor_id") == self.id]
@@ -2731,6 +2731,14 @@ class IngeTrazoOutputNode(NodeBase):
                     mn, mx = terrain_obj.bounds()
                     if mn is not None and hasattr(viewport, "camera") and hasattr(viewport.camera, "fit_to"):
                         viewport.camera.fit_to(mn, mx)
+
+                if not is_live:
+                    notify = getattr(viewport, "notify_scene_changed", None)
+                    if callable(notify):
+                        notify()
+                    if hasattr(viewport, "flash_status"):
+                        viewport.flash_status(f"Baked terrain '{mesh_data.name if mesh_data else 'Terrain'}' to IngeTrazo", 3000)
+
                 viewport.update()
                 return
 
@@ -3256,7 +3264,7 @@ def _sample_image_data(
         pts_xyz = np.stack([X, Y, Z], axis=-1).reshape(-1, 3)
         points = [Point3D(float(p[0]), float(p[1]), float(p[2])) for p in pts_xyz]
         cols_rgb = (py_buf[..., :3].astype(np.float32) / 255.0).reshape(-1, 3)
-        colors = [(float(c[0]), float(c[1]), float(c[2])) for c in cols_rgb]
+        colors = [(float(c[0]), float(c[1]), float(c[2])) for c in cols_rgb] if use_texture else []
 
         faces: List[FaceData] = []
         for j in range(count_v - 1):
@@ -3265,12 +3273,29 @@ def _sample_image_data(
                 i10 = j * count_u + (i + 1)
                 i11 = (j + 1) * count_u + (i + 1)
                 i01 = (j + 1) * count_u + i
-                c0 = colors[i00]
-                c1 = colors[i10]
-                c2 = colors[i11]
-                c3 = colors[i01]
-                avg_c = ((c0[0]+c1[0]+c2[0]+c3[0])*0.25, (c0[1]+c1[1]+c2[1]+c3[1])*0.25, (c0[2]+c1[2]+c2[2]+c3[2])*0.25)
+                if use_texture and colors:
+                    c0 = colors[i00]
+                    c1 = colors[i10]
+                    c2 = colors[i11]
+                    c3 = colors[i01]
+                    avg_c = ((c0[0]+c1[0]+c2[0]+c3[0])*0.25, (c0[1]+c1[1]+c2[1]+c3[1])*0.25, (c0[2]+c1[2]+c2[2]+c3[2])*0.25)
+                else:
+                    avg_c = None
                 faces.append(FaceData(vertices=[points[i00], points[i10], points[i11], points[i01]], color=avg_c))
+
+        # Vectorized wireframe grid line segments (horizontal and vertical quad edges)
+        pts_grid = np.stack([X, Y, Z], axis=-1)  # (count_v, count_u, 3)
+        h_starts = pts_grid[:, :-1, :]            # (count_v, count_u - 1, 3)
+        h_ends   = pts_grid[:, 1:, :]             # (count_v, count_u - 1, 3)
+        h_lines  = np.stack([h_starts, h_ends], axis=2).reshape(-1, 3)
+
+        v_starts = pts_grid[:-1, :, :]            # (count_v - 1, count_u, 3)
+        v_ends   = pts_grid[1:, :, :]             # (count_v - 1, count_u, 3)
+        v_lines  = np.stack([v_starts, v_ends], axis=2).reshape(-1, 3)
+
+        line_pts = np.concatenate([h_lines, v_lines], axis=0).astype(np.float32)
+        line_vbo_bytes = line_pts.tobytes()
+        line_vbo_count = len(line_pts)
 
         terrain_obj = None
         try:
@@ -3317,6 +3342,8 @@ def _sample_image_data(
 
             terrain_obj._vbo_bytes = vbo_bytes
             terrain_obj._vbo_count = vbo_count
+            terrain_obj._line_vbo_bytes = line_vbo_bytes
+            terrain_obj._line_vbo_count = line_vbo_count
             terrain_obj.texture_image = qimg if use_texture else None
         except Exception as ex:
             import logging
@@ -3379,11 +3406,14 @@ def _sample_image_data(
             p2 = points[idx11]
             p3 = points[idx01]
 
-            avg_c = (
-                (colors[idx00][0] + colors[idx10][0] + colors[idx11][0] + colors[idx01][0]) * 0.25,
-                (colors[idx00][1] + colors[idx10][1] + colors[idx11][1] + colors[idx01][1]) * 0.25,
-                (colors[idx00][2] + colors[idx10][2] + colors[idx11][2] + colors[idx01][2]) * 0.25
-            )
+            if use_texture and colors:
+                avg_c = (
+                    (colors[idx00][0] + colors[idx10][0] + colors[idx11][0] + colors[idx01][0]) * 0.25,
+                    (colors[idx00][1] + colors[idx10][1] + colors[idx11][1] + colors[idx01][1]) * 0.25,
+                    (colors[idx00][2] + colors[idx10][2] + colors[idx11][2] + colors[idx01][2]) * 0.25
+                )
+            else:
+                avg_c = None
             faces.append(FaceData(vertices=[p0, p1, p2, p3], color=avg_c))
             triangles.append((idx00, idx10, idx11))
             triangles.append((idx00, idx11, idx01))
@@ -3432,6 +3462,19 @@ def _sample_image_data(
                     return (QVector3D(min(xs), min(ys), min(zs)),
                             QVector3D(max(xs), max(ys), max(zs)))
             terrain_obj = FallbackTerrain(qv_points, uvs, triangles, count_u, count_v, (0.0, 0.0, size_x, size_y), (qimg if use_texture else None))
+
+        from array import array
+        line_floats = array("f")
+        for j in range(count_v):
+            for i in range(count_u - 1):
+                p1, p2 = points[j * count_u + i], points[j * count_u + i + 1]
+                line_floats.extend([p1.x, p1.y, p1.z, p2.x, p2.y, p2.z])
+        for i in range(count_u):
+            for j in range(count_v - 1):
+                p1, p2 = points[j * count_u + i], points[(j + 1) * count_u + i]
+                line_floats.extend([p1.x, p1.y, p1.z, p2.x, p2.y, p2.z])
+        terrain_obj._line_vbo_bytes = line_floats.tobytes()
+        terrain_obj._line_vbo_count = len(line_floats) // 3
     except Exception as ex:
         import logging
         logging.getLogger("ingetrazo.plugins.node_editor").debug(f"Could not construct terrain_obj: {ex}")
@@ -3579,8 +3622,17 @@ class ImageSamplerNode(NodeBase):
         cnt_u = int(self.get_input("Count U", 30))
         cnt_v = int(self.get_input("Count V", 30))
 
-        use_tex = bool(self.get_input("Texture", self.widget_values.get("texture", True)))
-        invert = bool(self.widget_values.get("invert", False))
+        port_tex = next((p for p in self.inputs if p.name == "Texture"), None)
+        if port_tex and port_tex.has_connection:
+            use_tex = bool(self.get_input("Texture", True))
+        else:
+            use_tex = bool(self.widget_values.get("Texture", self.widget_values.get("texture", True)))
+
+        port_inv = next((p for p in self.inputs if p.name == "Invert"), None)
+        if port_inv and port_inv.has_connection:
+            invert = bool(self.get_input("Invert", False))
+        else:
+            invert = bool(self.widget_values.get("Invert", self.widget_values.get("invert", False)))
         channel = str(self.widget_values.get("channel", "Grayscale"))
         filter_mode = str(self.widget_values.get("filter", "Bilinear"))
 

@@ -240,6 +240,42 @@ class NodeBase:
         pass
 
     def serialize(self) -> dict:
+        clean_widgets = {}
+        for k, v in self.widget_values.items():
+            if str(k).startswith("_"):
+                continue
+            if isinstance(v, (int, float, str, bool)) or v is None:
+                clean_widgets[k] = v
+            elif isinstance(v, (list, tuple)):
+                try:
+                    clean_widgets[k] = [
+                        x if isinstance(x, (int, float, str, bool)) or x is None
+                        else (float(x) if hasattr(x, "__float__") else str(x))
+                        for x in v
+                    ]
+                except Exception:
+                    pass
+            elif isinstance(v, dict):
+                try:
+                    clean_widgets[k] = {
+                        str(dk): dv for dk, dv in v.items()
+                        if not str(dk).startswith("_") and (isinstance(dv, (int, float, str, bool)) or dv is None)
+                    }
+                except Exception:
+                    pass
+            elif hasattr(v, "item"):
+                try:
+                    clean_widgets[k] = v.item()
+                except Exception:
+                    pass
+            elif hasattr(v, "__dict__") or "QImage" in type(v).__name__ or "QPixmap" in type(v).__name__:
+                continue
+            else:
+                try:
+                    clean_widgets[k] = str(v)
+                except Exception:
+                    pass
+
         return {
             "id": self.id,
             "type": self.__class__.__name__,
@@ -248,7 +284,7 @@ class NodeBase:
             "y": self.y,
             "inputs": [p.serialize() for p in self.inputs],
             "outputs": [p.serialize() for p in self.outputs],
-            "widgets": copy.deepcopy(self.widget_values)
+            "widgets": clean_widgets
         }
 
     def deserialize(self, data: dict) -> None:

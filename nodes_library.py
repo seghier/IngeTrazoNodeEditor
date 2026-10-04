@@ -2676,78 +2676,11 @@ class IngeTrazoOutputNode(NodeBase):
             if not scene:
                 return
 
-            # Auto-synthesize fast hardware TerrainObject for ANY dense mesh during live preview
-            if is_live and terrain_obj is None and mesh_data and len(mesh_data.faces) > 50:
-                try:
-                    import numpy as np
-                    from georef.terrain import TerrainObject
-                    raw_floats = []
-                    qv_pts = []
-                    all_tris = []
-                    vert_idx = 0
-                    for f in mesh_data.faces:
-                        pts = f.vertices
-                        if len(pts) == 4:
-                            for idx in (0, 1, 2, 0, 2, 3):
-                                p = pts[idx]
-                                raw_floats.extend([float(p.x), float(p.y), float(p.z), 0.0, 0.0])
-                                qv_pts.append(QVector3D(float(p.x), float(p.y), float(p.z)))
-                            all_tris.append((vert_idx, vert_idx + 1, vert_idx + 2))
-                            all_tris.append((vert_idx + 3, vert_idx + 4, vert_idx + 5))
-                            vert_idx += 6
-                        elif len(pts) >= 3:
-                            p0 = pts[0]
-                            for i in range(1, len(pts) - 1):
-                                p1, p2 = pts[i], pts[i + 1]
-                                for p in (p0, p1, p2):
-                                    raw_floats.extend([float(p.x), float(p.y), float(p.z), 0.0, 0.0])
-                                    qv_pts.append(QVector3D(float(p.x), float(p.y), float(p.z)))
-                                all_tris.append((vert_idx, vert_idx + 1, vert_idx + 2))
-                                vert_idx += 3
-                    vbo_bytes = np.array(raw_floats, dtype=np.float32).tobytes()
-                    uvs_dummy = [(0.0, 0.0)] * len(qv_pts)
-                    xs = [v.x() for v in qv_pts]
-                    ys = [v.y() for v in qv_pts]
-                    bbox = (min(xs), min(ys), max(xs), max(ys)) if xs else (0.0, 0.0, 0.0, 0.0)
-                    terrain_obj = TerrainObject(qv_pts, uvs_dummy, all_tris, (0, 0, 1, 1, 0), nx=0, ny=0, bbox=bbox)
-                    terrain_obj._vbo_bytes = vbo_bytes
-                    terrain_obj._vbo_count = len(raw_floats) // 5
-                except Exception:
-                    pass
-
-            # 1. TERRAIN STREAMING / BAKING (Hardware-accelerated OpenGL VBO, zero CPU orbit lag)
-            if terrain_obj is not None:
-                # Remove any existing B-Rep group from scene.groups
-                sc_groups = getattr(scene, "groups", [])
-                to_remove = [g for g in sc_groups if isinstance(getattr(g, "ext", None), dict) and g.ext.get("node_editor_id") == self.id]
-                for g in to_remove:
-                    sc_groups.remove(g)
-
-                first_terrain = scene.terrain is None
-                scene.terrain = terrain_obj
-                viewport.upload_terrain(terrain_obj)
-                self._is_terrain_active = True
-                if first_terrain and hasattr(terrain_obj, "bounds"):
-                    mn, mx = terrain_obj.bounds()
-                    if mn is not None and hasattr(viewport, "camera") and hasattr(viewport.camera, "fit_to"):
-                        viewport.camera.fit_to(mn, mx)
-
-                if not is_live:
-                    notify = getattr(viewport, "notify_scene_changed", None)
-                    if callable(notify):
-                        notify()
-                    if hasattr(viewport, "flash_status"):
-                        viewport.flash_status(f"Baked terrain '{mesh_data.name if mesh_data else 'Terrain'}' to IngeTrazo", 3000)
-
-                viewport.update()
-                return
-
-            # If switching away from terrain mode (or clearing)
-            if getattr(self, "_is_terrain_active", False) and terrain_obj is None:
-                if getattr(scene, "terrain", None) is not None:
-                    scene.terrain = None
-                    viewport.upload_terrain(None)
-                self._is_terrain_active = False
+            # Clear any flat temporary terrain layer so the 3D shaded model renders
+            if getattr(scene, "terrain", None) is not None:
+                scene.terrain = None
+                viewport.upload_terrain(None)
+            self._is_terrain_active = False
 
             if not mesh_data or (not mesh_data.faces and not mesh_data.edges):
                 # Clean up any leftover group for this node
@@ -2764,8 +2697,44 @@ class IngeTrazoOutputNode(NodeBase):
             layer_name = mesh_data.layer or "Layer 0"
             mat_name = mesh_data.material
 
-            def mutate(sc):
-                native_mesh = Mesh()
+            try:
+                import numpy as np
+            except ImportError:
+                np = None
+
+            native_mesh = Mesh()
+            has_holes = any(getattr(f, "holes", None) for f in mesh_data.faces)
+
+            # High-performance C/NumPy bulk mesh builder (same as topology_tool.py)
+            if np is not None and len(mesh_data.faces) > 0 and not has_holes:
+                raw_pos = []
+                sizes = []
+                attrs = []
+                for f in mesh_data.faces:
+                    n = len(f.vertices)
+                    if n < 3:
+                        continue
+                    sizes.append(n)
+                    for p in f.vertices:
+                        raw_pos.append((float(p.x), float(p.y), float(p.z)))
+                    att = {}
+                    if f.color:
+                        att["color"] = list(f.color)
+                    if mat_name:
+                        att["mat"] = mat_name
+                    if layer_name:
+                        att["layer"] = layer_name
+                    attrs.append(att if att else None)
+
+                pos_arr = np.asarray(raw_pos, dtype=float)
+                sizes_arr = np.asarray(sizes, dtype=np.int64)
+                native_mesh.add_faces_bulk(
+                    np.ascontiguousarray(pos_arr, dtype=float),
+                    sizes_arr,
+                    np.ones(len(sizes_arr), dtype=np.int64),
+                    attrs=attrs if any(attrs) else None
+                )
+            else:
                 for idx, face in enumerate(mesh_data.faces):
                     if len(face.vertices) < 3:
                         continue
@@ -2784,47 +2753,32 @@ class IngeTrazoOutputNode(NodeBase):
                             if layer_name:
                                 f.attrs["layer"] = layer_name
                     except Exception:
-                        try:
-                            if len(face.vertices) == 4:
-                                p0, p1, p2, p3 = face.vertices
-                                v0 = QVector3D(float(p0.x), float(p0.y), float(p0.z))
-                                v1 = QVector3D(float(p1.x), float(p1.y), float(p1.z))
-                                v2 = QVector3D(float(p2.x), float(p2.y), float(p2.z))
-                                v3 = QVector3D(float(p3.x), float(p3.y), float(p3.z))
-                                f1 = native_mesh.add_face([v0, v1, v2])
-                                f2 = native_mesh.add_face([v0, v2, v3])
-                                if face.color:
-                                    if f1 and getattr(f1, "attrs", None) is not None:
-                                        f1.attrs["color"] = list(face.color)
-                                    if f2 and getattr(f2, "attrs", None) is not None:
-                                        f2.attrs["color"] = list(face.color)
-                        except Exception:
-                            pass
-
-                # Add explicit edges
-                for edge in mesh_data.edges:
-                    try:
-                        e = native_mesh.add_edge(
-                            QVector3D(float(edge.a.x), float(edge.a.y), float(edge.a.z)),
-                            QVector3D(float(edge.b.x), float(edge.b.y), float(edge.b.z))
-                        )
-                        if e and edge.soft:
-                            e.soft = True
-                    except Exception:
                         pass
 
-                # If dense mesh/terrain, mark edges soft and hidden to prevent _sync_edges overhead
-                if getattr(mesh_data, "is_terrain", False) or len(mesh_data.faces) > 100:
-                    for e in getattr(native_mesh, "edges", []):
+            # Smooth edges for terrain / dense relief: hides wireframe clutter and enables smooth 3D sun shading at 120 FPS
+            if getattr(mesh_data, "is_terrain", False) or len(mesh_data.faces) > 50:
+                for e in native_mesh.edges:
+                    e.soft = True
+
+            # Add explicit edges if any
+            for edge in getattr(mesh_data, "edges", []):
+                try:
+                    e = native_mesh.add_edge(
+                        QVector3D(float(edge.a.x), float(edge.a.y), float(edge.a.z)),
+                        QVector3D(float(edge.b.x), float(edge.b.y), float(edge.b.z))
+                    )
+                    if e and edge.soft:
                         e.soft = True
-                        e.hidden = True
+                except Exception:
+                    pass
 
-                native_mesh._chunk_dirty = True
-                native_mesh._mut_serial += 1
+            native_mesh._chunk_dirty = True
+            native_mesh._mut_serial += 1
 
-                # Check if parametric group exists
+            if is_live:
+                # Live preview updates or creates the ephemeral group keyed by node_editor_id
                 target_group = None
-                for g in getattr(sc, "groups", []):
+                for g in getattr(scene, "groups", []):
                     ext = getattr(g, "ext", None)
                     if isinstance(ext, dict) and ext.get("node_editor_id") == self.id:
                         target_group = g
@@ -2835,39 +2789,58 @@ class IngeTrazoOutputNode(NodeBase):
                     target_group.name = grp_name
                     if layer_name:
                         target_group.layer = layer_name
+                    if mat_name:
+                        target_group.material = mat_name
                 else:
                     g = Group(native_mesh, name=grp_name)
                     g.component = False
                     if layer_name:
                         g.layer = layer_name
+                    if mat_name:
+                        g.material = mat_name
                     g.ext = {"node_editor_id": self.id}
-                    sc.groups.append(g)
+                    scene.groups.append(g)
 
-                sc.version += 1
-
-            if is_live:
-                mutate(scene)
+                scene.version += 1
                 notify = getattr(viewport, "notify_scene_changed", None)
                 if callable(notify):
                     notify()
                 viewport.update()
+
             else:
-                # If manual bake, clear live terrain display since it is now baked into scene.groups
-                if getattr(self, "_is_terrain_active", False):
-                    scene.terrain = None
-                    viewport.upload_terrain(None)
-                    self._is_terrain_active = False
+                # Manual Bake: Permanently commits a new Group into IngeTrazo
+                def _next_unique_name(sc, base):
+                    used = {g.name for g in getattr(sc, "groups", [])}
+                    if base not in used:
+                        return base
+                    n = 2
+                    while f"{base} {n}" in used:
+                        n += 1
+                    return f"{base} {n}"
+
+                baked_name = _next_unique_name(scene, grp_name)
+                baked_group = Group(native_mesh, name=baked_name)
+                baked_group.component = False
+                if layer_name:
+                    baked_group.layer = layer_name
+                if mat_name:
+                    baked_group.material = mat_name
+
+                def do_bake(sc):
+                    sc.groups.append(baked_group)
+                    sc.version += 1
 
                 if hasattr(viewport, "history") and hasattr(viewport.history, "execute"):
-                    viewport.history.execute(SnapshotImport(mutate))
+                    viewport.history.execute(SnapshotImport(do_bake))
                 else:
-                    mutate(scene)
+                    do_bake(scene)
+
                 notify = getattr(viewport, "notify_scene_changed", None)
                 if callable(notify):
                     notify()
                 viewport.update()
                 if hasattr(viewport, "flash_status"):
-                    viewport.flash_status(f"Baked '{grp_name}' to IngeTrazo", 3000)
+                    viewport.flash_status(f"Baked '{baked_name}' to IngeTrazo", 3000)
 
         except Exception as ex:
             import logging

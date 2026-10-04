@@ -319,9 +319,14 @@ class NodeEditorWidget(QWidget):
     def save_graph_file(self) -> None:
         path, _ = QFileDialog.getSaveFileName(self, "Save Node Graph", "", "IngeTrazo Graph (*.itgraph);;JSON (*.json)")
         if path:
-            data = self.graph.serialize()
-            Path(path).write_text(json.dumps(data, indent=2), encoding="utf-8")
-            self.status.showMessage(f"Saved: {Path(path).name}", 3000)
+            try:
+                data = self.graph.serialize()
+                Path(path).write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+                self.status.showMessage(f"Saved: {Path(path).name}", 3000)
+            except Exception as ex:
+                import logging
+                logging.getLogger("ingetrazo.plugins.node_editor").error(f"Error saving graph: {ex}", exc_info=True)
+                QMessageBox.critical(self, "Error Saving Graph", f"Failed to save graph:\n{ex}")
 
     def load_graph_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Open Node Graph", "", "IngeTrazo Graph (*.itgraph);;JSON (*.json)")

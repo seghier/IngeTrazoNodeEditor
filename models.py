@@ -96,6 +96,68 @@ class Vector3D:
 
 
 @dataclass
+class Domain:
+    """1D numerical interval [start, end]."""
+    start: float = 0.0
+    end: float = 1.0
+
+    @property
+    def min(self) -> float:
+        return min(self.start, self.end)
+
+    @property
+    def max(self) -> float:
+        return max(self.start, self.end)
+
+    @property
+    def length(self) -> float:
+        return abs(self.end - self.start)
+
+    @property
+    def span(self) -> float:
+        return self.end - self.start
+
+    @property
+    def mid(self) -> float:
+        return (self.start + self.end) * 0.5
+
+    def to_tuple(self) -> Tuple[float, float]:
+        return (self.start, self.end)
+
+    def evaluate(self, t: float) -> float:
+        """Evaluate normalized parameter t in [0, 1] across domain."""
+        return self.start + t * (self.end - self.start)
+
+    def __iter__(self):
+        yield self.start
+        yield self.end
+
+    def __repr__(self) -> str:
+        return f"Domain({self.start:.3g} To {self.end:.3g})"
+
+
+@dataclass
+class Domain2D:
+    """2D numerical domain [u_min, u_max] x [v_min, v_max]."""
+    u: Domain = field(default_factory=lambda: Domain(0.0, 1.0))
+    v: Domain = field(default_factory=lambda: Domain(0.0, 1.0))
+
+    @property
+    def u_span(self) -> float:
+        return self.u.length
+
+    @property
+    def v_span(self) -> float:
+        return self.v.length
+
+    def to_tuple(self) -> Tuple[float, float, float, float]:
+        return (self.u.start, self.u.end, self.v.start, self.v.end)
+
+    def __repr__(self) -> str:
+        return f"Domain2D(U: {self.u.start:.3g} To {self.u.end:.3g}, V: {self.v.start:.3g} To {self.v.end:.3g})"
+
+
+@dataclass
 class PolylineData:
     points: List[Point3D] = field(default_factory=list)
     closed: bool = False
@@ -160,6 +222,7 @@ class MeshData:
     material: Optional[str] = None
     terrain_obj: Optional[Any] = None
     is_terrain: bool = False
+    texture_image: Optional[Any] = None
 
     def merge(self, other: MeshData) -> MeshData:
         return MeshData(
@@ -169,7 +232,8 @@ class MeshData:
             layer=self.layer or other.layer,
             material=self.material or other.material,
             terrain_obj=self.terrain_obj or other.terrain_obj,
-            is_terrain=self.is_terrain or other.is_terrain
+            is_terrain=self.is_terrain or other.is_terrain,
+            texture_image=self.texture_image or other.texture_image
         )
 
     def translated(self, v: Vector3D) -> MeshData:

@@ -354,6 +354,9 @@ class NodeInspectorPanel(QWidget):
             spin_min = QDoubleSpinBox() if not is_int else QSpinBox()
             spin_min.setRange(-1000000, 1000000)
             spin_min.setValue(min_val if not is_int else int(round(min_val)))
+            spin_min.setKeyboardTracking(False)
+            if hasattr(spin_min, "lineEdit") and spin_min.lineEdit():
+                spin_min.lineEdit().returnPressed.connect(spin_min.clearFocus)
             if not is_int:
                 spin_min.setDecimals(decimals)
             grid.addWidget(spin_min, 0, 1)
@@ -363,6 +366,9 @@ class NodeInspectorPanel(QWidget):
             spin_max = QDoubleSpinBox() if not is_int else QSpinBox()
             spin_max.setRange(-1000000, 1000000)
             spin_max.setValue(max_val if not is_int else int(round(max_val)))
+            spin_max.setKeyboardTracking(False)
+            if hasattr(spin_max, "lineEdit") and spin_max.lineEdit():
+                spin_max.lineEdit().returnPressed.connect(spin_max.clearFocus)
             if not is_int:
                 spin_max.setDecimals(decimals)
             grid.addWidget(spin_max, 1, 1)
@@ -374,6 +380,9 @@ class NodeInspectorPanel(QWidget):
                 spin_dec = QSpinBox()
                 spin_dec.setRange(0, 6)
                 spin_dec.setValue(decimals)
+                spin_dec.setKeyboardTracking(False)
+                if hasattr(spin_dec, "lineEdit") and spin_dec.lineEdit():
+                    spin_dec.lineEdit().returnPressed.connect(spin_dec.clearFocus)
                 grid.addWidget(spin_dec, 2, 1)
 
             # Value
@@ -382,6 +391,9 @@ class NodeInspectorPanel(QWidget):
             spin_val = QDoubleSpinBox() if not is_int else QSpinBox()
             spin_val.setRange(min_val, max_val)
             spin_val.setValue(cur_val if not is_int else int(round(cur_val)))
+            spin_val.setKeyboardTracking(False)
+            if hasattr(spin_val, "lineEdit") and spin_val.lineEdit():
+                spin_val.lineEdit().returnPressed.connect(spin_val.clearFocus)
             if not is_int:
                 spin_val.setDecimals(decimals)
             grid.addWidget(spin_val, row_idx, 1)

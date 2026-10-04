@@ -10,6 +10,7 @@ from typing import List, Dict, Any, Optional, Union
 from .engine import NodeBase, PortType, Port
 from .models import (
     Point3D, Vector3D, PolylineData, FaceData, EdgeData, MeshData,
+    Domain, Domain2D,
     create_box, create_cylinder, create_sphere, extrude_profile
 )
 
@@ -544,6 +545,14 @@ class DivideRangeNode(NodeBase):
         e_in = self.get_input("End", 1.0)
         c_in = self.get_input("Count", 10)
 
+        # Allow Domain object into Start port
+        if hasattr(s_in, "start") and hasattr(s_in, "end"):
+            e_in = s_in.end
+            s_in = s_in.start
+        elif isinstance(s_in, (list, tuple)) and len(s_in) == 2 and not isinstance(s_in[0], (list, tuple)):
+            e_in = s_in[1]
+            s_in = s_in[0]
+
         is_list = any(isinstance(v, (list, tuple)) for v in [s_in, e_in, c_in])
         if not is_list:
             try:
@@ -576,12 +585,17 @@ class DivideRangeNode(NodeBase):
             all_series: List[List[float]] = []
             all_steps: List[float] = []
             for i in range(n_items):
+                raw_st = starts[min(i, len(starts) - 1)]
+                raw_en = ends[min(i, len(ends) - 1)]
+                if hasattr(raw_st, "start") and hasattr(raw_st, "end"):
+                    raw_en = raw_st.end
+                    raw_st = raw_st.start
                 try:
-                    st = float(starts[min(i, len(starts) - 1)])
+                    st = float(raw_st)
                 except Exception:
                     st = 0.0
                 try:
-                    en = float(ends[min(i, len(ends) - 1)])
+                    en = float(raw_en)
                 except Exception:
                     en = 1.0
                 try:
@@ -604,6 +618,182 @@ class DivideRangeNode(NodeBase):
             else:
                 self.set_output("List", all_series)
                 self.set_output("Step", all_steps)
+
+
+@register_node
+class ConstructDomainNode(NodeBase):
+    name = "Domain"
+    category = "Math"
+    description = (
+        "Create a 1-dimensional domain interval [Start, End].\n"
+        "Outputs a Domain object, length, and midpoint span.\n"
+        "Supports scalar numbers, domains, and list broadcasting."
+    )
+    header_color = "#d08770"
+
+    def setup_ports(self) -> None:
+        self.add_input("Start", PortType.NUMBER, 0.0, "Start value of the numeric domain")
+        self.add_input("End", PortType.NUMBER, 1.0, "End value of the numeric domain")
+        self.add_output("Domain", PortType.ANY, "1D numeric domain interval")
+        self.add_output("Length", PortType.NUMBER, "Span / length of interval abs(End - Start)")
+        self.add_output("Mid", PortType.NUMBER, "Midpoint of interval (Start + End) / 2")
+
+    def compute(self, context: Optional[Dict[str, Any]] = None) -> None:
+        s_in = self.get_input("Start", 0.0)
+        e_in = self.get_input("End", 1.0)
+
+        is_list = any(isinstance(v, (list, tuple)) for v in [s_in, e_in])
+        if not is_list:
+            try:
+                s = float(s_in)
+            except Exception:
+                s = 0.0
+            try:
+                e = float(e_in)
+            except Exception:
+                e = 1.0
+            dom = Domain(s, e)
+            self.set_output("Domain", dom)
+            self.set_output("Length", dom.length)
+            self.set_output("Mid", dom.mid)
+        else:
+            starts = s_in if isinstance(s_in, (list, tuple)) else [s_in]
+            ends = e_in if isinstance(e_in, (list, tuple)) else [e_in]
+            n = max(len(starts), len(ends))
+            domains: List[Domain] = []
+            lengths: List[float] = []
+            mids: List[float] = []
+            for i in range(n):
+                try:
+                    s = float(starts[min(i, len(starts) - 1)])
+                except Exception:
+                    s = 0.0
+                try:
+                    e = float(ends[min(i, len(ends) - 1)])
+                except Exception:
+                    e = 1.0
+                d = Domain(s, e)
+                domains.append(d)
+                lengths.append(d.length)
+                mids.append(d.mid)
+            self.set_output("Domain", domains)
+            self.set_output("Length", lengths)
+            self.set_output("Mid", mids)
+
+
+@register_node
+class ConstructDomainAliasNode(ConstructDomainNode):
+    name = "Construct Domain"
+    category = "Math"
+    description = (
+        "Construct a numeric domain interval [Start, End].\n"
+        "Alias for 'Domain'."
+    )
+
+
+@register_node
+class DeconstructDomainNode(NodeBase):
+    name = "Deconstruct Domain"
+    category = "Math"
+    description = (
+        "Deconstruct a numeric domain interval into its Start, End, Length, and Midpoint components."
+    )
+    header_color = "#d08770"
+
+    def setup_ports(self) -> None:
+        self.add_input("Domain", PortType.ANY, description="1D domain or (start, end) pair")
+        self.add_output("Start", PortType.NUMBER, "Start value")
+        self.add_output("End", PortType.NUMBER, "End value")
+        self.add_output("Length", PortType.NUMBER, "Total span / length")
+        self.add_output("Mid", PortType.NUMBER, "Midpoint")
+
+    def compute(self, context: Optional[Dict[str, Any]] = None) -> None:
+        d_in = self.get_input("Domain")
+        if d_in is None:
+            return
+
+        def _unpack(d: Any) -> Tuple[float, float, float, float]:
+            if isinstance(d, Domain):
+                return d.start, d.end, d.length, d.mid
+            if hasattr(d, "start") and hasattr(d, "end"):
+                s, e = float(d.start), float(d.end)
+                return s, e, abs(e - s), (s + e) * 0.5
+            if isinstance(d, (list, tuple)) and len(d) >= 2:
+                try:
+                    s, e = float(d[0]), float(d[1])
+                    return s, e, abs(e - s), (s + e) * 0.5
+                except Exception:
+                    pass
+            try:
+                v = float(d)
+                return 0.0, v, abs(v), v * 0.5
+            except Exception:
+                return 0.0, 1.0, 1.0, 0.5
+
+        if isinstance(d_in, (list, tuple)) and (len(d_in) == 0 or not isinstance(d_in[0], (int, float))):
+            starts, ends, lengths, mids = [], [], [], []
+            for item in d_in:
+                s, e, l, m = _unpack(item)
+                starts.append(s)
+                ends.append(e)
+                lengths.append(l)
+                mids.append(m)
+            self.set_output("Start", starts)
+            self.set_output("End", ends)
+            self.set_output("Length", lengths)
+            self.set_output("Mid", mids)
+        else:
+            s, e, l, m = _unpack(d_in)
+            self.set_output("Start", s)
+            self.set_output("End", e)
+            self.set_output("Length", l)
+            self.set_output("Mid", m)
+
+
+@register_node
+class ConstructDomain2DNode(NodeBase):
+    name = "Domain 2D"
+    category = "Math"
+    description = (
+        "Create a 2-dimensional domain [U, V] from two 1D domains or numeric ranges.\n"
+        "Ideal for surfaces, grids, and image sampling."
+    )
+    header_color = "#d08770"
+
+    def setup_ports(self) -> None:
+        self.add_input("U", PortType.ANY, description="Domain U (Domain or number)")
+        self.add_input("V", PortType.ANY, description="Domain V (Domain or number)")
+        self.add_output("Domain 2D", PortType.ANY, "2D domain interval")
+        self.add_output("U Span", PortType.NUMBER, "Length of U domain")
+        self.add_output("V Span", PortType.NUMBER, "Length of V domain")
+        self.add_output("Area", PortType.NUMBER, "Area (U length * V length)")
+
+    def compute(self, context: Optional[Dict[str, Any]] = None) -> None:
+        def _to_domain(val: Any, default_val: float = 1.0) -> Domain:
+            if isinstance(val, Domain):
+                return val
+            if hasattr(val, "start") and hasattr(val, "end"):
+                return Domain(float(val.start), float(val.end))
+            if isinstance(val, (list, tuple)) and len(val) >= 2:
+                try:
+                    return Domain(float(val[0]), float(val[1]))
+                except Exception:
+                    pass
+            try:
+                v = float(val) if val is not None else default_val
+                return Domain(0.0, v)
+            except Exception:
+                return Domain(0.0, default_val)
+
+        u_dom = _to_domain(self.get_input("U"), 10.0)
+        v_dom = _to_domain(self.get_input("V"), 10.0)
+        dom2d = Domain2D(u=u_dom, v=v_dom)
+
+        self.set_output("Domain 2D", dom2d)
+        self.set_output("U Span", dom2d.u_span)
+        self.set_output("V Span", dom2d.v_span)
+        self.set_output("Area", dom2d.u_span * dom2d.v_span)
+
 
 
 VARIABLE_NAMES = [
@@ -2403,6 +2593,7 @@ class IngeTrazoOutputNode(NodeBase):
 
     def setup_ports(self) -> None:
         self.add_input("Geometry", PortType.ANY, description="MeshData, Terrain, faces, curves, or points")
+        self.add_input("Texture", PortType.BOOLEAN, description="Enable photo texture drape", default_value=True)
         self.add_input("Group Name", PortType.STRING, "ParametricModel")
         self.add_input("Layer", PortType.STRING, "Layer 0")
         self.add_input("Material", PortType.STRING, "")
@@ -2413,6 +2604,7 @@ class IngeTrazoOutputNode(NodeBase):
 
     def compute(self, context: Optional[Dict[str, Any]] = None) -> None:
         geom = self.get_input("Geometry")
+        use_texture = bool(self.get_input("Texture", True))
         grp_name = str(self.get_input("Group Name", "ParametricModel"))
         layer_name = str(self.get_input("Layer", "Layer 0"))
         mat_name = str(self.get_input("Material", ""))
@@ -2429,6 +2621,13 @@ class IngeTrazoOutputNode(NodeBase):
         if terrain_obj:
             mesh.terrain_obj = terrain_obj
             mesh.is_terrain = True
+
+        if not use_texture:
+            if terrain_obj is not None:
+                terrain_obj.texture_image = None
+            if mesh is not None:
+                mesh.texture_image = None
+
         mesh.name = grp_name
         if layer_name:
             mesh.layer = layer_name
@@ -2444,6 +2643,8 @@ class IngeTrazoOutputNode(NodeBase):
             getattr(geom, "_version", None),
             len(getattr(mesh, "faces", [])),
             len(getattr(mesh, "edges", [])),
+            use_texture,
+            getattr(terrain_obj, "texture_image", None) is not None,
             grp_name,
             layer_name,
             mat_name,
@@ -2882,15 +3083,16 @@ class ReferenceFaceNode(NodeBase):
 def _sample_image_data(
     image_path: str = "",
     qimg_override: Any = None,
-    domain_u: float = 10.0,
-    domain_v: float = 10.0,
-    min_h: float = 0.0,
-    max_h: float = 2.0,
+    domain_u: Any = 10.0,
+    domain_v: Any = 10.0,
+    min_h: Any = 0.0,
+    max_h: Any = 2.0,
     count_u: int = 80,
     count_v: int = 80,
     invert: bool = False,
     channel: str = "Grayscale",
-    filter_mode: str = "Bilinear"
+    filter_mode: str = "Bilinear",
+    use_texture: bool = True
 ):
     import os
     try:
@@ -2902,10 +3104,48 @@ def _sample_image_data(
     count_u = max(2, min(300, int(count_u)))
     count_v = max(2, min(300, int(count_v)))
 
+    # Domain 2D or 1D Domain handling
+    if hasattr(domain_u, "u_span") and hasattr(domain_u, "v_span"):
+        size_x = float(domain_u.u_span)
+        size_y = float(domain_u.v_span)
+    elif hasattr(domain_u, "span"):
+        size_x = float(domain_u.span)
+        size_y = float(domain_v.span) if hasattr(domain_v, "span") else (float(domain_v.length) if hasattr(domain_v, "length") else float(domain_v))
+    elif hasattr(domain_u, "length"):
+        size_x = float(domain_u.length)
+        size_y = float(domain_v.length) if hasattr(domain_v, "length") else (float(domain_v.span) if hasattr(domain_v, "span") else float(domain_v))
+    elif isinstance(domain_u, (tuple, list)) and len(domain_u) >= 2:
+        size_x = float(domain_u[1]) - float(domain_u[0])
+        size_y = (float(domain_v[1]) - float(domain_v[0])) if isinstance(domain_v, (tuple, list)) and len(domain_v) >= 2 else float(domain_v)
+    else:
+        try:
+            size_x = float(domain_u)
+        except Exception:
+            size_x = 10.0
+        try:
+            size_y = float(domain_v)
+        except Exception:
+            size_y = size_x
+
+    # Min / Max height handling (can be separate or from a Domain in min_h)
+    if hasattr(min_h, "min") and hasattr(min_h, "max"):
+        real_min = float(min_h.min)
+        real_max = float(min_h.max)
+    elif isinstance(min_h, (tuple, list)) and len(min_h) >= 2:
+        real_min = float(min_h[0])
+        real_max = float(min_h[1])
+    else:
+        try:
+            real_min = float(min_h)
+        except Exception:
+            real_min = 0.0
+        try:
+            real_max = float(max_h)
+        except Exception:
+            real_max = 2.0
+
     if QImage is None:
         # Fallback if Qt is not installed in the current environment
-        size_x = float(domain_u)
-        size_y = float(domain_v)
         pts_fallback: List[Point3D] = []
         vals_fallback: List[float] = []
         cols_fallback: List[Tuple[float, float, float]] = []
@@ -2921,7 +3161,7 @@ def _sample_image_data(
                 bright = math.sin(r) * 0.5 + 0.5
                 if invert:
                     bright = 1.0 - bright
-                z = min_h + bright * (max_h - min_h)
+                z = real_min + bright * (real_max - real_min)
                 pts_fallback.append(Point3D(x, y, z))
                 vals_fallback.append(bright)
                 cols_fallback.append((bright, bright, bright))
@@ -2957,8 +3197,6 @@ def _sample_image_data(
     img_w = qimg.width()
     img_h = qimg.height()
 
-    size_x = float(domain_u)
-    size_y = float(domain_v)
     if abs(size_y - size_x) < 1e-4 and img_w > 0:
         size_y = size_x * (float(img_h) / float(img_w))
 
@@ -2992,7 +3230,7 @@ def _sample_image_data(
         xs = np.linspace(0.0, size_x, count_u, dtype=np.float32)
         ys = np.linspace(0.0, size_y, count_v, dtype=np.float32)
         X, Y = np.meshgrid(xs, ys)
-        Z = min_h + bright * (max_h - min_h)
+        Z = real_min + bright * (real_max - real_min)
 
         us = np.linspace(0.0, 1.0, count_u, dtype=np.float32)
         vs = np.linspace(1.0, 0.0, count_v, dtype=np.float32)
@@ -3075,11 +3313,11 @@ def _sample_image_data(
                         zs = [v.z() for v in self.vertices]
                         return (QVector3D(min(xs), min(ys), min(zs)),
                                 QVector3D(max(xs), max(ys), max(zs)))
-                terrain_obj = FallbackTerrain(qv_points, uv_tuples, tri_tuples, count_u, count_v, (0.0, 0.0, size_x, size_y), qimg)
+                terrain_obj = FallbackTerrain(qv_points, uv_tuples, tri_tuples, count_u, count_v, (0.0, 0.0, size_x, size_y), (qimg if use_texture else None))
 
             terrain_obj._vbo_bytes = vbo_bytes
             terrain_obj._vbo_count = vbo_count
-            terrain_obj.texture_image = qimg
+            terrain_obj.texture_image = qimg if use_texture else None
         except Exception as ex:
             import logging
             logging.getLogger("ingetrazo.plugins.node_editor").debug(f"Could not construct terrain_obj: {ex}")
@@ -3087,6 +3325,7 @@ def _sample_image_data(
         mesh = MeshData(faces=faces, name="DisplacementMesh")
         mesh.terrain_obj = terrain_obj
         mesh.is_terrain = True
+        mesh.texture_image = qimg if use_texture else None
         return points, values, colors, mesh, img_w, img_h, qimg, terrain_obj
 
     # Pure Python fallback if numpy is unavailable
@@ -3121,7 +3360,7 @@ def _sample_image_data(
             if invert:
                 bright = 1.0 - bright
 
-            z = min_h + bright * (max_h - min_h)
+            z = real_min + bright * (real_max - real_min)
             points.append(Point3D(x, y, z))
             values.append(bright)
             colors.append((rf, gf, bf))
@@ -3171,7 +3410,7 @@ def _sample_image_data(
                 ny=count_v,
                 bbox=(0.0, 0.0, size_x, size_y)
             )
-            terrain_obj.texture_image = qimg
+            terrain_obj.texture_image = qimg if use_texture else None
         else:
             class FallbackTerrain:
                 def __init__(self, verts, uvs_list, tris, nx, ny, bbox, img):
@@ -3192,7 +3431,7 @@ def _sample_image_data(
                     zs = [v.z() for v in self.vertices]
                     return (QVector3D(min(xs), min(ys), min(zs)),
                             QVector3D(max(xs), max(ys), max(zs)))
-            terrain_obj = FallbackTerrain(qv_points, uvs, triangles, count_u, count_v, (0.0, 0.0, size_x, size_y), qimg)
+            terrain_obj = FallbackTerrain(qv_points, uvs, triangles, count_u, count_v, (0.0, 0.0, size_x, size_y), (qimg if use_texture else None))
     except Exception as ex:
         import logging
         logging.getLogger("ingetrazo.plugins.node_editor").debug(f"Could not construct terrain_obj: {ex}")
@@ -3200,6 +3439,7 @@ def _sample_image_data(
     mesh = MeshData(faces=faces, name="DisplacementMesh")
     mesh.terrain_obj = terrain_obj
     mesh.is_terrain = True
+    mesh.texture_image = qimg if use_texture else None
     return points, values, colors, mesh, img_w, img_h, qimg, terrain_obj
 
 
@@ -3310,10 +3550,11 @@ class ImageSamplerNode(NodeBase):
 
     def setup_ports(self) -> None:
         self.add_input("Image", PortType.ANY, description="Image file path (str) or QImage", default_value="")
-        self.add_input("Domain U", PortType.NUMBER, description="Size along X", default_value=10.0)
-        self.add_input("Domain V", PortType.NUMBER, description="Size along Y", default_value=10.0)
-        self.add_input("Min", PortType.NUMBER, description="Minimum height", default_value=0.0)
-        self.add_input("Max", PortType.NUMBER, description="Displacement height scale", default_value=2.0)
+        self.add_input("Texture", PortType.BOOLEAN, description="Enable photo texture drape (or solid relief)", default_value=True)
+        self.add_input("Domain U", PortType.ANY, description="Size along X (Domain or number)", default_value=10.0)
+        self.add_input("Domain V", PortType.ANY, description="Size along Y (Domain or number)", default_value=10.0)
+        self.add_input("Min", PortType.ANY, description="Minimum height (Domain or number)", default_value=0.0)
+        self.add_input("Max", PortType.ANY, description="Displacement height scale", default_value=2.0)
         self.add_input("Count U", PortType.INTEGER, description="Resolution along X", default_value=30)
         self.add_input("Count V", PortType.INTEGER, description="Resolution along Y", default_value=30)
 
@@ -3331,13 +3572,14 @@ class ImageSamplerNode(NodeBase):
         img_override = raw_img if hasattr(raw_img, "pixelColor") else None
         img_path = str(raw_img) if isinstance(raw_img, str) and raw_img else self.widget_values.get("image_path", "")
 
-        dom_u = float(self.get_input("Domain U", 10.0))
-        dom_v = float(self.get_input("Domain V", 10.0))
-        min_h = float(self.get_input("Min", 0.0))
-        max_h = float(self.get_input("Max", 2.0))
+        dom_u = self.get_input("Domain U", 10.0)
+        dom_v = self.get_input("Domain V", 10.0)
+        min_h = self.get_input("Min", 0.0)
+        max_h = self.get_input("Max", 2.0)
         cnt_u = int(self.get_input("Count U", 30))
         cnt_v = int(self.get_input("Count V", 30))
 
+        use_tex = bool(self.get_input("Texture", self.widget_values.get("texture", True)))
         invert = bool(self.widget_values.get("invert", False))
         channel = str(self.widget_values.get("channel", "Grayscale"))
         filter_mode = str(self.widget_values.get("filter", "Bilinear"))
@@ -3353,7 +3595,8 @@ class ImageSamplerNode(NodeBase):
             count_v=cnt_v,
             invert=invert,
             channel=channel,
-            filter_mode=filter_mode
+            filter_mode=filter_mode,
+            use_texture=use_tex
         )
 
         self.widget_values["_cached_qimage"] = qimg

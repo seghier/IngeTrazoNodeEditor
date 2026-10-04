@@ -189,6 +189,9 @@ class NodeItem(QGraphicsObject):
             spin.setSingleStep(1.0 if is_int else 0.1)
             spin.setValue(cur_val)
             spin.setFixedWidth(56)
+            spin.setKeyboardTracking(False)
+            if hasattr(spin, "lineEdit") and spin.lineEdit():
+                spin.lineEdit().returnPressed.connect(spin.clearFocus)
 
             slider.setStyleSheet("""
                 QSlider::groove:horizontal {
@@ -558,13 +561,13 @@ class NodeItem(QGraphicsObject):
             layout.setSpacing(3)
             if t == "ImageSamplerNode":
                 row_btns = QHBoxLayout()
-                row_btns.setSpacing(4)
-                btn_open = QPushButton("📂 Open...")
+                row_btns.setSpacing(3)
+                btn_open = QPushButton("📂 Open")
                 btn_open.setCursor(Qt.PointingHandCursor)
                 btn_open.setStyleSheet("""
                     QPushButton {
                         background: #434c5e; color: #eceff4; border: 1px solid #4c566a;
-                        border-radius: 4px; padding: 3px 6px; font-size: 10px; font-weight: bold;
+                        border-radius: 4px; padding: 3px 4px; font-size: 10px; font-weight: bold;
                     }
                     QPushButton:hover { background: #4c566a; border-color: #88c0d0; color: #88c0d0; }
                 """)
@@ -575,13 +578,26 @@ class NodeItem(QGraphicsObject):
                 btn_inv.setStyleSheet("""
                     QPushButton {
                         background: #3b4252; color: #eceff4; border: 1px solid #4c566a;
-                        border-radius: 4px; padding: 3px 6px; font-size: 10px;
+                        border-radius: 4px; padding: 3px 4px; font-size: 10px;
                     }
                     QPushButton:checked { background: #88c0d0; color: #1e222b; font-weight: bold; }
                     QPushButton:hover { border-color: #88c0d0; }
                 """)
+                btn_tex = QPushButton("🖼 Texture")
+                btn_tex.setCursor(Qt.PointingHandCursor)
+                btn_tex.setCheckable(True)
+                btn_tex.setChecked(bool(self.node.widget_values.get("texture", True)))
+                btn_tex.setStyleSheet("""
+                    QPushButton {
+                        background: #3b4252; color: #eceff4; border: 1px solid #4c566a;
+                        border-radius: 4px; padding: 3px 4px; font-size: 10px;
+                    }
+                    QPushButton:checked { background: #a3be8c; color: #1e222b; font-weight: bold; }
+                    QPushButton:hover { border-color: #a3be8c; }
+                """)
                 row_btns.addWidget(btn_open, 1)
                 row_btns.addWidget(btn_inv, 1)
+                row_btns.addWidget(btn_tex, 1)
                 layout.addLayout(row_btns)
 
             lbl_pix = QLabel()
@@ -641,8 +657,15 @@ class NodeItem(QGraphicsObject):
                     if self.scene():
                         self.scene().notify_graph_changed()
 
+                def on_sampler_tex():
+                    self.node.widget_values["texture"] = btn_tex.isChecked()
+                    self.node.dirty = True
+                    if self.scene():
+                        self.scene().notify_graph_changed()
+
                 btn_open.clicked.connect(on_sampler_browse)
                 btn_inv.clicked.connect(on_sampler_inv)
+                btn_tex.clicked.connect(on_sampler_tex)
 
         self.widget_proxy = proxy
         proxy.setWidget(container)

@@ -2449,8 +2449,14 @@ class IngeTrazoOutputNode(NodeBase):
 
             def mutate(sc):
                 # 1. Build native IngeTrazo Mesh
+                from PySide6.QtWidgets import QApplication
+                app_inst = QApplication.instance()
+
                 native_mesh = Mesh()
-                for face in mesh_data.faces:
+                for idx, face in enumerate(mesh_data.faces):
+                    if app_inst and (idx % 100 == 0):
+                        app_inst.processEvents()
+
                     if len(face.vertices) < 3:
                         continue
                     try:
@@ -2468,7 +2474,23 @@ class IngeTrazoOutputNode(NodeBase):
                             if layer_name:
                                 f.attrs["layer"] = layer_name
                     except Exception:
-                        pass
+                        try:
+                            # Fallback if non-planar quad failed: split into two triangles
+                            if len(face.vertices) == 4:
+                                p0, p1, p2, p3 = face.vertices
+                                v0 = QVector3D(float(p0.x), float(p0.y), float(p0.z))
+                                v1 = QVector3D(float(p1.x), float(p1.y), float(p1.z))
+                                v2 = QVector3D(float(p2.x), float(p2.y), float(p2.z))
+                                v3 = QVector3D(float(p3.x), float(p3.y), float(p3.z))
+                                f1 = native_mesh.add_face([v0, v1, v2])
+                                f2 = native_mesh.add_face([v0, v2, v3])
+                                if face.color:
+                                    if f1 and getattr(f1, "attrs", None) is not None:
+                                        f1.attrs["color"] = list(face.color)
+                                    if f2 and getattr(f2, "attrs", None) is not None:
+                                        f2.attrs["color"] = list(face.color)
+                        except Exception:
+                            pass
 
                 # Add explicit edges
                 for edge in mesh_data.edges:
@@ -2766,8 +2788,8 @@ def _sample_image_data(
         QImage = None
         QColor = None
 
-    count_u = max(2, min(1000, int(count_u)))
-    count_v = max(2, min(1000, int(count_v)))
+    count_u = max(2, min(300, int(count_u)))
+    count_v = max(2, min(300, int(count_v)))
 
     if QImage is None:
         # Fallback if Qt is not installed in the current environment
@@ -2833,35 +2855,21 @@ def _sample_image_data(
     values: List[float] = []
     colors: List[Tuple[float, float, float]] = []
 
+    # Fast C++ Qt image downsampling to exact grid dimensions (SIMD-accelerated)
+    from PySide6.QtCore import Qt
+    smooth = Qt.SmoothTransformation if filter_mode != "Nearest" else Qt.FastTransformation
+    scaled_qimg = qimg.scaled(count_u, count_v, Qt.IgnoreAspectRatio, smooth)
+
     for j in range(count_v):
         v = j / float(count_v - 1)
         y = v * size_y
-        py = (1.0 - v) * (img_h - 1)  # bottom-to-top 3D alignment
+        py = (count_v - 1) - j  # bottom-to-top 3D alignment
 
         for i in range(count_u):
             u = i / float(count_u - 1)
             x = u * size_x
-            px = u * (img_w - 1)
-
-            if filter_mode == "Nearest" or img_w <= 1 or img_h <= 1:
-                col = qimg.pixelColor(int(round(px)), int(round(py)))
-                rf, gf, bf, af = col.redF(), col.greenF(), col.blueF(), col.alphaF()
-            else:
-                x0 = int(px)
-                y0 = int(py)
-                x1 = min(x0 + 1, img_w - 1)
-                y1 = min(y0 + 1, img_h - 1)
-                fx = px - x0
-                fy = py - y0
-                c00 = qimg.pixelColor(x0, y0)
-                c10 = qimg.pixelColor(x1, y0)
-                c01 = qimg.pixelColor(x0, y1)
-                c11 = qimg.pixelColor(x1, y1)
-
-                rf = (1 - fx) * (1 - fy) * c00.redF() + fx * (1 - fy) * c10.redF() + (1 - fx) * fy * c01.redF() + fx * fy * c11.redF()
-                gf = (1 - fx) * (1 - fy) * c00.greenF() + fx * (1 - fy) * c10.greenF() + (1 - fx) * fy * c01.greenF() + fx * fy * c11.greenF()
-                bf = (1 - fx) * (1 - fy) * c00.blueF() + fx * (1 - fy) * c10.blueF() + (1 - fx) * fy * c01.blueF() + fx * fy * c11.blueF()
-                af = (1 - fx) * (1 - fy) * c00.alphaF() + fx * (1 - fy) * c10.alphaF() + (1 - fx) * fy * c01.alphaF() + fx * fy * c11.alphaF()
+            col = scaled_qimg.pixelColor(i, py)
+            rf, gf, bf, af = col.redF(), col.greenF(), col.blueF(), col.alphaF()
 
             if channel == "Red":
                 bright = rf
@@ -2945,6 +2953,11 @@ class ImageFileNode(NodeBase):
         self.set_output("Path", file_path)
         self.set_output("Width", w)
         self.set_output("Height", h)
+        if hasattr(self, "on_display_updated") and callable(self.on_display_updated):
+            try:
+                self.on_display_updated()
+            except Exception:
+                pass
 
 
 @register_node
@@ -2988,6 +3001,11 @@ class ImagePreviewNode(NodeBase):
         self.set_output("Image", qimg)
         self.set_output("Width", w)
         self.set_output("Height", h)
+        if hasattr(self, "on_display_updated") and callable(self.on_display_updated):
+            try:
+                self.on_display_updated()
+            except Exception:
+                pass
 
 
 @register_node
@@ -3007,8 +3025,8 @@ class ImageSamplerNode(NodeBase):
         self.add_input("Domain V", PortType.NUMBER, description="Size along Y", default_value=10.0)
         self.add_input("Min", PortType.NUMBER, description="Minimum height", default_value=0.0)
         self.add_input("Max", PortType.NUMBER, description="Displacement height scale", default_value=2.0)
-        self.add_input("Count U", PortType.INTEGER, description="Resolution along X", default_value=80)
-        self.add_input("Count V", PortType.INTEGER, description="Resolution along Y", default_value=80)
+        self.add_input("Count U", PortType.INTEGER, description="Resolution along X", default_value=30)
+        self.add_input("Count V", PortType.INTEGER, description="Resolution along Y", default_value=30)
 
         self.add_output("Mesh", PortType.MESH, "3D relief mesh")
         self.add_output("Points", PortType.ANY, "Displaced 3D points (List[Point3D])")
@@ -3027,8 +3045,8 @@ class ImageSamplerNode(NodeBase):
         dom_v = float(self.get_input("Domain V", 10.0))
         min_h = float(self.get_input("Min", 0.0))
         max_h = float(self.get_input("Max", 2.0))
-        cnt_u = int(self.get_input("Count U", 80))
-        cnt_v = int(self.get_input("Count V", 80))
+        cnt_u = int(self.get_input("Count U", 30))
+        cnt_v = int(self.get_input("Count V", 30))
 
         invert = bool(self.widget_values.get("invert", False))
         channel = str(self.widget_values.get("channel", "Grayscale"))
@@ -3055,6 +3073,11 @@ class ImageSamplerNode(NodeBase):
         self.set_output("Colors", cols)
         self.set_output("Width", w)
         self.set_output("Height", h)
+        if hasattr(self, "on_display_updated") and callable(self.on_display_updated):
+            try:
+                self.on_display_updated()
+            except Exception:
+                pass
 
 
 @register_node

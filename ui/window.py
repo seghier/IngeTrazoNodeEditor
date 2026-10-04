@@ -279,6 +279,16 @@ class NodeEditorWidget(QWidget):
         )
         if hasattr(self, "inspector") and not self.inspector.isHidden():
             self.inspector.refresh_values()
+
+        # Refresh visual previews on node items (e.g. Image Preview and Image Sampler tiles)
+        if hasattr(self, "scene") and self.scene:
+            for item in getattr(self.scene, "node_items", {}).values():
+                if hasattr(item, "update_preview_pix") and callable(item.update_preview_pix):
+                    try:
+                        item.update_preview_pix()
+                    except Exception:
+                        pass
+
         self.status.showMessage("Evaluation completed.", 1500)
 
     def bake_to_scene(self) -> None:

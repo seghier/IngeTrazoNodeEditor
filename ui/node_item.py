@@ -89,6 +89,7 @@ class NodeItem(QGraphicsObject):
         self.spin_widget: Optional[QDoubleSpinBox] = None
         self.expr_line_edit: Optional[QLineEdit] = None
         self.panel_pte: Optional[QPlainTextEdit] = None
+        self.update_preview_pix: Optional[Any] = None
         self.width = self.MIN_WIDTH
         self.height = 80.0
 
@@ -111,8 +112,8 @@ class NodeItem(QGraphicsObject):
                 content_height += 62.0
                 self.width = max(self.width, 210.0)
             elif t_name == "ImageFileNode":
-                content_height += 64.0
-                self.width = max(self.width, 210.0)
+                content_height += 36.0
+                self.width = max(self.width, 180.0)
             elif t_name == "ImagePreviewNode":
                 content_height += 106.0
                 self.width = max(self.width, 210.0)
@@ -522,8 +523,9 @@ class NodeItem(QGraphicsObject):
         elif t == "ImageFileNode":
             layout = QVBoxLayout(container)
             layout.setContentsMargins(8, 0, 8, 4)
-            layout.setSpacing(3)
-            btn = QPushButton("📂 Open Image...")
+            layout.setSpacing(0)
+            saved_p = self.node.widget_values.get("image_path", "")
+            btn = QPushButton("📂 Change Image..." if saved_p else "📂 Open Image...")
             btn.setCursor(Qt.PointingHandCursor)
             btn.setStyleSheet("""
                 QPushButton {
@@ -533,12 +535,6 @@ class NodeItem(QGraphicsObject):
                 QPushButton:hover { background: #4c566a; border-color: #88c0d0; color: #88c0d0; }
                 QPushButton:pressed { background: #2e3440; }
             """)
-            saved_p = self.node.widget_values.get("image_path", "")
-            import os
-            init_txt = os.path.basename(saved_p) if saved_p else "No file selected"
-            lbl_status = QLabel(init_txt)
-            lbl_status.setAlignment(Qt.AlignCenter)
-            lbl_status.setStyleSheet("color: #a3be8c; font-size: 10px; font-weight: bold;" if saved_p else "color: #d8dee9; font-size: 10px; font-style: italic;")
 
             def on_browse_file():
                 from PySide6.QtWidgets import QFileDialog
@@ -548,15 +544,13 @@ class NodeItem(QGraphicsObject):
                 )
                 if path:
                     self.node.widget_values["image_path"] = path
-                    lbl_status.setText(os.path.basename(path))
-                    lbl_status.setStyleSheet("color: #a3be8c; font-size: 10px; font-weight: bold;")
+                    btn.setText("📂 Change Image...")
                     self.node.dirty = True
                     if self.scene():
                         self.scene().notify_graph_changed()
 
             btn.clicked.connect(on_browse_file)
             layout.addWidget(btn)
-            layout.addWidget(lbl_status)
 
         elif t in ("ImagePreviewNode", "ImageSamplerNode"):
             layout = QVBoxLayout(container)
@@ -599,9 +593,17 @@ class NodeItem(QGraphicsObject):
                 import os
                 from PySide6.QtGui import QImage, QPixmap
                 qimg = self.node.widget_values.get("_cached_qimage")
-                p = self.node.widget_values.get("image_path", "")
-                if not qimg and p and os.path.exists(p):
-                    qimg = QImage(p)
+                if (qimg is None or (hasattr(qimg, "isNull") and qimg.isNull())) and hasattr(self.node, "get_input"):
+                    inp = self.node.get_input("Image", None)
+                    if hasattr(inp, "pixelColor") and not inp.isNull():
+                        qimg = inp
+                    elif isinstance(inp, str) and inp and os.path.exists(inp):
+                        qimg = QImage(inp)
+                if qimg is None or (hasattr(qimg, "isNull") and qimg.isNull()):
+                    p = self.node.widget_values.get("image_path", "")
+                    if p and os.path.exists(p):
+                        qimg = QImage(p)
+
                 if qimg and not qimg.isNull():
                     pix = QPixmap.fromImage(qimg).scaled(lbl_pix.width() - 4, lbl_pix.height() - 4, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                     lbl_pix.setPixmap(pix)
@@ -610,6 +612,8 @@ class NodeItem(QGraphicsObject):
                     lbl_pix.setPixmap(QPixmap())
                     lbl_pix.setText("No Image Loaded")
 
+            self.update_preview_pix = update_preview_pix
+            self.node.on_display_updated = update_preview_pix
             update_preview_pix()
             layout.addWidget(lbl_pix)
 
@@ -648,9 +652,9 @@ class NodeItem(QGraphicsObject):
             proxy.setPos(0, widget_y)
             proxy.resize(self.width, 52.0)
         elif t == "ImageFileNode":
-            widget_y = self.height - 58.0
+            widget_y = self.height - 38.0
             proxy.setPos(0, widget_y)
-            proxy.resize(self.width, 52.0)
+            proxy.resize(self.width, 32.0)
         elif t == "ImagePreviewNode":
             widget_y = self.height - 98.0
             proxy.setPos(0, widget_y)

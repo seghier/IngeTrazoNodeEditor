@@ -2540,7 +2540,11 @@ def _to_mesh_data(geom: Any) -> Optional[MeshData]:
                 p1 = Point3D(float(v1.x()), float(v1.y()), float(v1.z()))
                 p2 = Point3D(float(v2.x()), float(v2.y()), float(v2.z()))
                 tri_faces.append(FaceData(vertices=[p0, p1, p2]))
-        return MeshData(faces=tri_faces, name="Terrain")
+        m = MeshData(faces=tri_faces, name="Terrain")
+        if hasattr(geom, "uvs"):
+            m.terrain_obj = geom
+            m.is_terrain = True
+        return m
     elif isinstance(geom, Point3D):
         return _point_to_marker(geom)
     elif isinstance(geom, PolylineData):
@@ -2599,7 +2603,7 @@ class IngeTrazoOutputNode(NodeBase):
     header_color = "#bf616a"
 
     def setup_ports(self) -> None:
-        self.add_input("Geometry", PortType.ANY, description="MeshData, faces, curves, or points")
+        self.add_input("Geometry", PortType.ANY, description="MeshData, Terrain, faces, curves, or points")
         self.add_input("Texture", PortType.BOOLEAN, description="Enable photo texture drape (Live preview only)", default_value=True)
         self.add_input("Group Name", PortType.STRING, "ParametricModel")
         self.add_input("Layer", PortType.STRING, "Layer 0")
@@ -2621,12 +2625,18 @@ class IngeTrazoOutputNode(NodeBase):
         layer_name = str(self.get_input("Layer", "Layer 0"))
         mat_name = str(self.get_input("Material", ""))
 
+        terrain_obj = None
+        if hasattr(geom, "vertices") and hasattr(geom, "triangles") and hasattr(geom, "uvs"):
+            terrain_obj = geom
+        elif isinstance(geom, MeshData) and getattr(geom, "terrain_obj", None):
+            terrain_obj = geom.terrain_obj
+
         mesh = _to_mesh_data(geom)
         if mesh is None:
             mesh = MeshData()
-
-        if not use_texture:
-            mesh.texture_image = None
+        if terrain_obj:
+            mesh.terrain_obj = terrain_obj
+            mesh.is_terrain = True
 
         mesh.name = grp_name
         if layer_name:
@@ -2639,10 +2649,12 @@ class IngeTrazoOutputNode(NodeBase):
         # Signature check for caching: prevent redundant viewport invalidation
         geom_sig = (
             id(geom),
+            id(terrain_obj) if terrain_obj else None,
             getattr(geom, "_version", None),
             len(getattr(mesh, "faces", [])),
             len(getattr(mesh, "edges", [])),
             use_texture,
+            getattr(terrain_obj, "texture_image", None) is not None,
             grp_name,
             layer_name,
             mat_name,
@@ -2659,6 +2671,7 @@ class IngeTrazoOutputNode(NodeBase):
     def bake(self, app: Any, is_live: bool = False) -> None:
         """Inject geometry into the IngeTrazo document."""
         mesh_data = self.last_mesh_data
+        terrain_obj = getattr(mesh_data, "terrain_obj", None) if mesh_data else None
 
         try:
             from PySide6.QtGui import QVector3D
@@ -2672,12 +2685,6 @@ class IngeTrazoOutputNode(NodeBase):
             scene = getattr(viewport, "scene", None)
             if not scene:
                 return
-
-            # Clean up GIS terrain if previously active
-            if getattr(self, "_is_terrain_active", False) or getattr(scene, "terrain", None) is not None:
-                scene.terrain = None
-                viewport.upload_terrain(None)
-                self._is_terrain_active = False
 
             def _next_unique_name(sc, base):
                 used = {g.name for g in getattr(sc, "groups", [])}
@@ -2699,6 +2706,145 @@ class IngeTrazoOutputNode(NodeBase):
             else:
                 use_texture = bool(self.widget_values.get("Texture", self.widget_values.get("texture", True)))
 
+            # =========================================================================
+            # CASE A: VIRTUAL GPU TERRAIN / IMAGE SAMPLER (120+ FPS Hardware Streaming)
+            # =========================================================================
+            if terrain_obj is not None:
+                if is_live:
+                    # Remove any leftover B-Rep groups created by this node
+                    sc_groups = getattr(scene, "groups", [])
+                    to_remove = [g for g in sc_groups if isinstance(getattr(g, "ext", None), dict) and g.ext.get("node_editor_id") == self.id]
+                    if to_remove:
+                        for g in to_remove:
+                            sc_groups.remove(g)
+                        scene.version += 1
+
+                    # Apply or disable texture on the virtual terrain object
+                    img = (
+                        getattr(mesh_data, "source_image", None)
+                        or getattr(terrain_obj, "source_image", None)
+                        or getattr(mesh_data, "texture_image", None)
+                        or getattr(terrain_obj, "texture_image", None)
+                    )
+                    if use_texture and img is not None and not img.isNull():
+                        terrain_obj.texture_image = img
+                    else:
+                        terrain_obj.texture_image = None
+
+                    terrain_obj.visible = True
+                    terrain_obj.show_wireframe = True
+
+                    first_terrain = scene.terrain is None
+                    scene.terrain = terrain_obj
+                    viewport.upload_terrain(terrain_obj)
+
+                    # Ensure line VAO attribute pointer is bound in OpenGL context
+                    if hasattr(viewport, "_terrain_lines_vao") and viewport._terrain_lines_vao is not None:
+                        try:
+                            viewport.makeCurrent()
+                            viewport._terrain_lines_vao.bind()
+                            viewport._terrain_lines_vbo.bind()
+                            viewport._program.enableAttributeArray(viewport._loc_pos)
+                            viewport._program.setAttributeBuffer(viewport._loc_pos, 0x1406, 0, 3)
+                            viewport._terrain_lines_vbo.release()
+                            viewport._terrain_lines_vao.release()
+                            viewport.doneCurrent()
+                        except Exception:
+                            pass
+
+                    self._is_terrain_active = True
+
+                    if first_terrain and hasattr(terrain_obj, "bounds"):
+                        mn, mx = terrain_obj.bounds()
+                        if mn is not None and hasattr(viewport, "camera") and hasattr(viewport.camera, "fit_to"):
+                            viewport.camera.fit_to(mn, mx)
+
+                    viewport.update()
+                    return
+
+                else:
+                    # =====================================================================
+                    # MANUAL BAKE: Commit permanent CAD mesh into IngeTrazo
+                    # CRITICAL USER DIRECTIVE: NEVER BAKE TEXTURE!
+                    # The baked mesh must be a clean, untextured B-Rep mesh with wireframe lines.
+                    # =====================================================================
+                    scene.terrain = None
+                    viewport.upload_terrain(None)
+                    self._is_terrain_active = False
+
+                    baked_name = _next_unique_name(scene, grp_name)
+                    native_mesh = Mesh()
+
+                    try:
+                        import numpy as np
+                    except ImportError:
+                        np = None
+
+                    if np is not None and mesh_data and len(mesh_data.faces) > 0:
+                        raw_pos = []
+                        sizes = []
+                        for f in mesh_data.faces:
+                            if len(f.vertices) < 3:
+                                continue
+                            sizes.append(len(f.vertices))
+                            for p in f.vertices:
+                                raw_pos.append((float(p.x), float(p.y), float(p.z)))
+
+                        pos_arr = np.asarray(raw_pos, dtype=float)
+                        sizes_arr = np.asarray(sizes, dtype=np.int64)
+                        # NEVER pass attrs with color: strictly untextured
+                        native_mesh.add_faces_bulk(
+                            np.ascontiguousarray(pos_arr, dtype=float),
+                            sizes_arr,
+                            np.ones(len(sizes_arr), dtype=np.int64),
+                            attrs=None
+                        )
+                        # Keep edges hard (e.soft = False) so wireframe lines are visible in CAD
+                        for e in native_mesh.edges:
+                            e.soft = False
+                    elif mesh_data:
+                        for f in mesh_data.faces:
+                            if len(f.vertices) >= 3:
+                                pts = [QVector3D(float(p.x), float(p.y), float(p.z)) for p in f.vertices]
+                                native_mesh.add_face(pts)
+                        for e in native_mesh.edges:
+                            e.soft = False
+
+                    native_mesh._chunk_dirty = True
+                    native_mesh._mut_serial += 1
+
+                    baked_group = Group(native_mesh, name=baked_name)
+                    baked_group.component = False
+                    if layer_name:
+                        baked_group.layer = layer_name
+                    # NEVER bake texture material: strictly untextured CAD material
+                    baked_group.material = None
+
+                    def do_bake_terrain(sc):
+                        sc.groups.append(baked_group)
+                        sc.version += 1
+
+                    if hasattr(viewport, "history") and hasattr(viewport.history, "execute"):
+                        viewport.history.execute(SnapshotImport(do_bake_terrain))
+                    else:
+                        do_bake_terrain(scene)
+
+                    notify = getattr(viewport, "notify_scene_changed", None)
+                    if callable(notify):
+                        notify()
+                    viewport.update()
+                    if hasattr(viewport, "flash_status"):
+                        viewport.flash_status(f"Baked '{baked_name}' (untextured) to IngeTrazo", 3000)
+                    return
+
+            # =========================================================================
+            # CASE B: REGULAR B-REP MESHES (Mesh from Points, Extrusions, Solids...)
+            # =========================================================================
+            if getattr(self, "_is_terrain_active", False) or getattr(scene, "terrain", None) is not None:
+                scene.terrain = None
+                viewport.upload_terrain(None)
+                self._is_terrain_active = False
+
             if not mesh_data or (not mesh_data.faces and not mesh_data.edges):
                 sc_groups = getattr(scene, "groups", [])
                 to_remove = [g for g in sc_groups if isinstance(getattr(g, "ext", None), dict) and g.ext.get("node_editor_id") == self.id]
@@ -2709,12 +2855,9 @@ class IngeTrazoOutputNode(NodeBase):
                     viewport.update()
                 return
 
-            # CRITICAL USER REQUIREMENTS:
-            # 1. Non-textured mesh must have 3D directional lighting, Newell normals, and visible wireframe quad lines.
-            # 2. When baking (is_live=False), NEVER bake textured mesh even if texture is enabled in the sampler node!
+            # For regular meshes: live preview can have colors if texture enabled, but BAKE NEVER HAS TEXTURE
             apply_texture = is_live and use_texture
 
-            # Construct clean B-Rep mesh with exact faces, Newell normals, and visible wireframe quad/tri edges
             native_mesh = Mesh()
             for idx, face in enumerate(mesh_data.faces):
                 if len(face.vertices) < 3:
@@ -2727,7 +2870,6 @@ class IngeTrazoOutputNode(NodeBase):
                     )
                     f = native_mesh.add_face(verts, holes)
                     if f is not None and getattr(f, "attrs", None) is not None:
-                        # Only assign face color if live preview and texture is enabled
                         if apply_texture and face.color:
                             f.attrs["color"] = list(face.color)
                         if is_live and mat_name and apply_texture:
@@ -2737,7 +2879,6 @@ class IngeTrazoOutputNode(NodeBase):
                 except Exception:
                     pass
 
-            # Explicit edges (preserve custom soft flags if set, leave hard by default for Rhino-like wireframe)
             for edge in getattr(mesh_data, "edges", []):
                 try:
                     e = native_mesh.add_edge(
@@ -2805,7 +2946,7 @@ class IngeTrazoOutputNode(NodeBase):
                     notify()
                 viewport.update()
                 if hasattr(viewport, "flash_status"):
-                    viewport.flash_status(f"Baked '{baked_name}' to IngeTrazo", 3000)
+                    viewport.flash_status(f"Baked '{baked_name}' (untextured) to IngeTrazo", 3000)
 
         except Exception as ex:
             import logging
@@ -3282,7 +3423,10 @@ def _sample_image_data(
             terrain_obj._vbo_count = vbo_count
             terrain_obj._line_vbo_bytes = line_vbo_bytes
             terrain_obj._line_vbo_count = line_vbo_count
+            terrain_obj.source_image = qimg
             terrain_obj.texture_image = qimg if use_texture else None
+            terrain_obj.visible = True
+            terrain_obj.show_wireframe = True
         except Exception as ex:
             import logging
             logging.getLogger("ingetrazo.plugins.node_editor").debug(f"Could not construct terrain_obj: {ex}")
@@ -3300,6 +3444,9 @@ def _sample_image_data(
                 edges.append(EdgeData(points[idx1], points[idx2]))
 
         mesh = MeshData(faces=faces, edges=edges, name="DisplacementMesh")
+        mesh.terrain_obj = terrain_obj
+        mesh.is_terrain = True
+        mesh.source_image = qimg
         mesh.texture_image = qimg if use_texture else None
         return points, values, colors, mesh, img_w, img_h, qimg, terrain_obj
 
@@ -3423,6 +3570,10 @@ def _sample_image_data(
                 line_floats.extend([p1.x, p1.y, p1.z, p2.x, p2.y, p2.z])
         terrain_obj._line_vbo_bytes = line_floats.tobytes()
         terrain_obj._line_vbo_count = len(line_floats) // 3
+        terrain_obj.source_image = qimg
+        terrain_obj.texture_image = qimg if use_texture else None
+        terrain_obj.visible = True
+        terrain_obj.show_wireframe = True
     except Exception as ex:
         import logging
         logging.getLogger("ingetrazo.plugins.node_editor").debug(f"Could not construct terrain_obj: {ex}")
@@ -3436,6 +3587,9 @@ def _sample_image_data(
             edges.append(EdgeData(points[j * count_u + i], points[(j + 1) * count_u + i]))
 
     mesh = MeshData(faces=faces, edges=edges, name="DisplacementMesh")
+    mesh.terrain_obj = terrain_obj
+    mesh.is_terrain = True
+    mesh.source_image = qimg
     mesh.texture_image = qimg if use_texture else None
     return points, values, colors, mesh, img_w, img_h, qimg, terrain_obj
 

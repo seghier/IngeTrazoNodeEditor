@@ -85,6 +85,16 @@ IngeTrazo automatically discovers plugins in your user plugins directory:
 
 ---
 
+## 📚 Developing Custom Nodes & AI Guide
+
+Looking to author your own nodes or configure AI agents to work on the codebase? Check out the **[`tutorial/`](tutorial/)** directory:
+
+- **[`tutorial/node_template.py`](tutorial/node_template.py)**: Copy-pasteable boilerplate templates for math processors, 3D geometry/mesh creators, and list-aware nodes.
+- **[`tutorial/create_simple_node.md`](tutorial/create_simple_node.md)**: A complete, beginner-friendly walkthrough on building a custom parametric node from scratch.
+- **[`tutorial/ai_agent_guide.md`](tutorial/ai_agent_guide.md)**: Architectural invariants, performance gates (120 FPS GPU streaming vs CAD bake), and rules for AI assistants (Antigravity, Cursor, Copilot).
+
+---
+
 ## 📄 License
 
 Licensed under the [GNU General Public License v3.0 (GPL-3.0)](LICENSE), matching IngeTrazo's GPL-3.0 license.

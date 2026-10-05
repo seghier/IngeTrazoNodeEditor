@@ -145,6 +145,13 @@ class NodeEditorWidget(QWidget):
         btn_clear.clicked.connect(self.clear_graph)
         toolbar.addWidget(btn_clear)
 
+        toolbar.addSeparator()
+
+        btn_reload_nodes = QPushButton("🔄 Reload Nodes")
+        btn_reload_nodes.setToolTip("Scan the 'nodes/' folder and reload custom node definitions live")
+        btn_reload_nodes.clicked.connect(self.reload_custom_nodes)
+        toolbar.addWidget(btn_reload_nodes)
+
         # Central Canvas View & Inspector Panel
         self.splitter = QSplitter(Qt.Horizontal, self)
         self.splitter.addWidget(self.view)
@@ -341,6 +348,23 @@ class NodeEditorWidget(QWidget):
                 self.status.showMessage(f"Loaded: {Path(path).name}", 3000)
             except Exception as ex:
                 QMessageBox.warning(self, "Error Loading Graph", str(ex))
+
+    def reload_custom_nodes(self) -> None:
+        """Scan 'nodes/' and user directories to discover and reload custom nodes live."""
+        try:
+            try:
+                from ..nodes import discover_nodes
+            except ImportError:
+                from nodes import discover_nodes
+            from ..nodes_library import NODE_REGISTRY
+
+            discovered = discover_nodes(registry=NODE_REGISTRY)
+            msg = f"Reloaded nodes: {len(discovered)} custom node(s) discovered (Total: {len(NODE_REGISTRY)})"
+            if hasattr(self, "status") and self.status:
+                self.status.showMessage(msg, 4000)
+        except Exception as ex:
+            if hasattr(self, "status") and self.status:
+                self.status.showMessage(f"Error reloading nodes: {ex}", 5000)
 
     # ---------------------------------------------------------------------------------
     # Presets & Default Graph

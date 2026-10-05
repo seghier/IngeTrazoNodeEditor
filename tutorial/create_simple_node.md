@@ -196,10 +196,41 @@ class StarPolygonNode(NodeBase):
 
 ---
 
-## 🧪 6. Testing Your Node
+---
 
-1. Save your code into [`nodes_library.py`](file:///C:/Users/pc/Documents/GitHub/IngeTrazoNodeEditor/nodes_library.py).
-2. Launch IngeTrazo and open **Extensions ▸ Parametric Node Editor**.
-3. Double-click on the canvas or press `Tab`.
-4. Type your node's name (e.g. `Star Polygon`).
-5. Place the node, connect a **Number Slider** into `Outer Radius`, and connect the `Mesh` output into an **IngeTrazo Output** node to view the result in real-time!
+## 📁 6. Creating Modular Nodes in the `nodes/` Folder
+
+You don't need to modify `nodes_library.py` directly. You can create separate files in the **`nodes/`** directory, and the editor will **automatically detect and load them**:
+
+### How It Works
+1. Create a Python file inside `nodes/` (e.g. `nodes/my_civil_tools.py`).
+2. Subclass `NodeBase` and set your node's `name` and `category`.
+3. Save the file.
+4. The auto-discovery engine scans the `nodes/` folder (and subfolders) on startup and registers your node automatically.
+
+```
+IngeTrazoNodeEditor/
+├── nodes/
+│   ├── __init__.py               # Auto-discovery engine
+│   ├── example_custom_node.py    # Example modular node
+│   └── my_civil_tools.py         # <-- Your new custom file!
+```
+
+> 💡 **User AppData Support**: You can also put custom `.py` files inside `%APPDATA%/ingetrazo/plugins/node_editor/nodes/`. They will be detected automatically without modifying the core repository!
+
+### What Makes a Node Detectable?
+The scanner automatically registers any class in your `.py` file that:
+- Inherits from `NodeBase` (`issubclass(cls, NodeBase)`).
+- Has a specific `name` (not the default `'BaseNode'`).
+- *(Optional)* Is decorated with `@register_node`.
+
+---
+
+## 🧪 7. Testing & Live Reloading
+
+1. Save your custom file (e.g. `nodes/my_custom_node.py`).
+2. In the Node Editor toolbar, click **🔄 Reload Nodes** (or restart IngeTrazo).
+3. The status bar will show: `Reloaded nodes: X custom node(s) discovered`.
+4. Double-click on the canvas or press `Tab`.
+5. Your custom node will immediately appear in the search palette!
+6. Connect a **Number Slider** to its inputs, and connect its output to **IngeTrazo Output** to view the geometry live in the 3D viewport.

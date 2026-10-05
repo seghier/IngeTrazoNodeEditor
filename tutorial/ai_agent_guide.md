@@ -41,17 +41,22 @@
   ```
 * Setting `self.error` automatically triggers a red error border on the canvas node item.
 
-### 📋 Rule 4: Mandatory Node Registration
-* Every new node class **MUST** be decorated with `@register_node`:
-  ```python
-  @register_node
-  class MyNode(NodeBase):
-      name = "My Unique Name"
-      category = "Math"          # Must be an existing category
-      description = "Detailed explanation of inputs, outputs, and behavior."
-      header_color = "#d08770"
-  ```
-* Never duplicate node names. The double-click search palette (`NodeSearchDialog`) dynamically reflects all entries registered in `NODE_REGISTRY`.
+### 📋 Rule 4: Modular Node Authoring & Automatic Discovery
+* **Modular File Architecture**:
+  - Rather than bloating `nodes_library.py`, new nodes can be authored in dedicated Python files inside the **`nodes/`** folder (e.g. `nodes/my_feature.py`).
+  - Subfolders (e.g. `nodes/civil/`, `nodes/structural/`) are automatically recursed.
+  - User custom nodes can also reside in `%APPDATA%/ingetrazo/plugins/node_editor/nodes/`.
+* **Automatic Detection Criteria**:
+  - The discovery engine (`nodes.discover_nodes()`) automatically inspects imported files.
+  - A class is **automatically detected and registered** if:
+    1. It is a class inheriting from `NodeBase` (`issubclass(cls, NodeBase)`).
+    2. It is not `NodeBase` itself.
+    3. It defines a non-default `name` (e.g. `name = "My Feature"`).
+    4. *(Optional)* It is decorated with `@register_node`.
+* **Live Discovery**:
+  - Runs automatically at startup.
+  - Can be re-triggered live from the UI using the **🔄 Reload Nodes** toolbar button.
+* Never duplicate node names across categories. The double-click search palette (`NodeSearchDialog`) dynamically reflects all entries registered in `NODE_REGISTRY`.
 
 ### 🔄 Rule 5: Pure Python Fallback Invariant
 * Optional dependencies (like `numpy`, `shapely`, `py_straight_skeleton`) must always be wrapped in `try...except ImportError`.

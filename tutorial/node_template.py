@@ -18,18 +18,26 @@ from __future__ import annotations
 import math
 from typing import Optional, Dict, Any, List, Union
 
-# Import base node and port definitions
-from .engine import NodeBase, PortType, Port
-
-# Import geometry models and primitive builders
-from .models import (
-    Point3D, Vector3D, PolylineData, FaceData, EdgeData, MeshData,
-    Domain, Domain2D,
-    create_box, create_cylinder, create_sphere, extrude_profile
-)
-
-# Import the global node registry decorator
-from .nodes_library import register_node
+# Import base node and port definitions (supports both relative package import and standalone file in nodes/)
+try:
+    from ..engine import NodeBase, PortType, Port
+    from ..models import (
+        Point3D, Vector3D, PolylineData, FaceData, EdgeData, MeshData,
+        Domain, Domain2D,
+        create_box, create_cylinder, create_sphere, extrude_profile
+    )
+    from ..nodes import register_node
+except ImportError:
+    try:
+        from engine import NodeBase, PortType, Port
+        from models import (
+            Point3D, Vector3D, PolylineData, FaceData, EdgeData, MeshData,
+            Domain, Domain2D,
+            create_box, create_cylinder, create_sphere, extrude_profile
+        )
+        from nodes_library import register_node
+    except ImportError:
+        def register_node(cls): return cls
 
 
 # =====================================================================================

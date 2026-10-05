@@ -7,12 +7,20 @@ import math
 import copy
 from typing import List, Dict, Any, Optional, Union
 
-from .engine import NodeBase, PortType, Port
-from .models import (
-    Point3D, Vector3D, PolylineData, FaceData, EdgeData, MeshData,
-    Domain, Domain2D,
-    create_box, create_cylinder, create_sphere, extrude_profile
-)
+try:
+    from .engine import NodeBase, PortType, Port
+    from .models import (
+        Point3D, Vector3D, PolylineData, FaceData, EdgeData, MeshData,
+        Domain, Domain2D,
+        create_box, create_cylinder, create_sphere, extrude_profile
+    )
+except ImportError:
+    from engine import NodeBase, PortType, Port
+    from models import (
+        Point3D, Vector3D, PolylineData, FaceData, EdgeData, MeshData,
+        Domain, Domain2D,
+        create_box, create_cylinder, create_sphere, extrude_profile
+    )
 
 try:
     from .py_straight_skeleton import compute_skeleton
@@ -3772,5 +3780,22 @@ class ImageSamplerNode(NodeBase):
                 self.on_display_updated()
             except Exception:
                 pass
+
+
+# =====================================================================================
+# MODULAR NODE AUTO-DISCOVERY
+# Automatically scan the 'nodes/' folder and custom user directories for modular nodes
+# =====================================================================================
+try:
+    try:
+        from .nodes import set_global_registry, discover_nodes
+    except ImportError:
+        from nodes import set_global_registry, discover_nodes
+    set_global_registry(NODE_REGISTRY)
+    discover_nodes(registry=NODE_REGISTRY)
+except Exception as _ex:
+    import logging
+    logging.getLogger("ingetrazo.plugins.node_editor").debug(f"Auto-discovery notice: {_ex}")
+
 
 

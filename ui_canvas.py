@@ -8234,18 +8234,31 @@ class NodeEditorFloatingWindow(QMainWindow):
 
     def hideEvent(self, event: Any) -> None:
         super().hideEvent(event)
-        if hasattr(self._editor, "_notify_panel_visibility"):
+        if hasattr(self._editor, "_check_panel_visibility"):
+            self._editor._check_panel_visibility()
+        elif hasattr(self._editor, "_notify_panel_visibility"):
             self._editor._notify_panel_visibility(False)
 
     def showEvent(self, event: Any) -> None:
         super().showEvent(event)
-        if hasattr(self._editor, "_notify_panel_visibility"):
+        if hasattr(self._editor, "_check_panel_visibility"):
+            self._editor._check_panel_visibility()
+        elif hasattr(self._editor, "_notify_panel_visibility"):
             self._editor._notify_panel_visibility(True)
+
+    def changeEvent(self, event: Any) -> None:
+        super().changeEvent(event)
+        from PySide6.QtCore import QEvent
+        if event.type() == QEvent.WindowStateChange:
+            if hasattr(self._editor, "_check_panel_visibility"):
+                self._editor._check_panel_visibility()
 
     def closeEvent(self, event: Any) -> None:
         if self._is_host_closing:
             event.accept()
-            if hasattr(self._editor, "_notify_panel_visibility"):
+            if hasattr(self._editor, "_check_panel_visibility"):
+                self._editor._check_panel_visibility()
+            elif hasattr(self._editor, "_notify_panel_visibility"):
                 self._editor._notify_panel_visibility(False)
         else:
             event.ignore()
@@ -8408,6 +8421,9 @@ class NodeEditorWidget(QWidget):
                 )
 
                 dock.visibilityChanged.connect(self._on_dock_visibility_changed)
+                dock.topLevelChanged.connect(lambda *_: self._check_panel_visibility())
+                dock.dockLocationChanged.connect(lambda *_: self._check_panel_visibility())
+                self._hook_dock_tab_bars()
 
             except Exception:
 
@@ -8415,7 +8431,90 @@ class NodeEditorWidget(QWidget):
 
         self._update_popout_button(self.is_floating())
 
+    def _hook_dock_tab_bars(self) -> None:
+        win = self.get_main_window()
+        if win is None or self._dock is None:
+            return
+        try:
+            from PySide6.QtWidgets import QTabBar
+            bars = [tb for tb in win.findChildren(QTabBar) if tb.parent() is win]
+            dock_title = self._dock.windowTitle()
+            for tb in bars:
+                titles = [tb.tabText(i) for i in range(tb.count())]
+                if dock_title in titles and not tb.property("ne_tab_watched"):
+                    tb.setProperty("ne_tab_watched", True)
+                    tb.currentChanged.connect(lambda *_: self._check_panel_visibility())
+        except Exception:
+            pass
 
+    def is_panel_active(self) -> bool:
+        """Determines whether the Node Editor is currently visible and active to the user."""
+        if self.is_floating():
+            fw = self._floating_window
+            if fw is None:
+                return False
+            try:
+                return fw.isVisible() and not fw.isMinimized()
+            except Exception:
+                return False
+
+        dock = self._dock
+        if dock is None:
+            return False
+
+        try:
+            if not dock.isVisible() or dock.isHidden():
+                return False
+            if dock.isFloating():
+                return not dock.isMinimized()
+
+            win = dock.parent() or self.get_main_window()
+            if win is None:
+                return True
+
+            self._hook_dock_tab_bars()
+            from PySide6.QtWidgets import QTabBar
+            bars = [tb for tb in win.findChildren(QTabBar) if tb.parent() is win]
+            dock_title = dock.windowTitle()
+            for tb in bars:
+                titles = [tb.tabText(i) for i in range(tb.count())]
+                if dock_title in titles:
+                    return tb.tabText(tb.currentIndex()) == dock_title
+            return True
+        except Exception:
+            return True
+
+    def _check_panel_visibility(self) -> None:
+        """Evaluates whether the panel active state changed and notifies bridge + resizes tray."""
+        active = self.is_panel_active()
+        if active != getattr(self, "_last_active_state", None):
+            self._last_active_state = active
+            self._notify_panel_visibility(active)
+
+            win = self.get_main_window()
+            if win is None or not hasattr(win, "resizeDocks") or self.is_floating() or self._dock is None:
+                return
+
+            tray = getattr(win, "tray", None)
+            try:
+                if active:
+                    if tray is not None and tray.width() > 100 and self._saved_tray_width is None:
+                        self._saved_tray_width = tray.width()
+                    if win.dockWidgetArea(self._dock) in (
+                        Qt.DockWidgetArea.RightDockWidgetArea,
+                        Qt.DockWidgetArea.LeftDockWidgetArea,
+                    ):
+                        target_w = max(self._preferred_dock_width, self._dock.width())
+                        QTimer.singleShot(0, lambda: win.resizeDocks([self._dock], [target_w], Qt.Orientation.Horizontal))
+                else:
+                    if self._dock.width() > 260:
+                        self._preferred_dock_width = self._dock.width()
+                    if tray is not None and self._saved_tray_width:
+                        restore_w = self._saved_tray_width
+                        self._saved_tray_width = None
+                        QTimer.singleShot(0, lambda: win.resizeDocks([tray], [restore_w], Qt.Orientation.Horizontal))
+            except Exception:
+                pass
 
     def _notify_panel_visibility(self, visible: bool) -> None:
         if self._on_panel_visibility_changed is not None:
@@ -8426,74 +8525,18 @@ class NodeEditorWidget(QWidget):
 
     def hideEvent(self, event: Any) -> None:
         super().hideEvent(event)
-        if not self.is_floating():
-            self._notify_panel_visibility(False)
+        self._check_panel_visibility()
 
     def showEvent(self, event: Any) -> None:
         super().showEvent(event)
-        if not self.is_floating():
-            self._notify_panel_visibility(True)
+        self._hook_dock_tab_bars()
+        self._check_panel_visibility()
 
     def _on_dock_visibility_changed(self, visible: bool) -> None:
-
         """
-
-        Preserves IngeTrazo's normal side-tray width for other tabs while allowing
-
-        the Node Editor tab to have its own wider resizable width when active.
-        Also clears previews when dock is hidden and restores evaluation when shown.
-
+        Triggered when dock visibility toggles (hide/show).
         """
-
-        if self.is_floating() or self._dock is None:
-
-            return
-
-        self._notify_panel_visibility(visible)
-
-        win = self.get_main_window()
-
-        if win is None or not hasattr(win, "resizeDocks"):
-
-            return
-
-        tray = getattr(win, "tray", None)
-
-        try:
-
-            if visible:
-
-                if tray is not None and tray.width() > 100 and self._saved_tray_width is None:
-
-                    self._saved_tray_width = tray.width()
-
-                if win.dockWidgetArea(self._dock) in (
-
-                    Qt.DockWidgetArea.RightDockWidgetArea,
-
-                    Qt.DockWidgetArea.LeftDockWidgetArea,
-
-                ):
-
-                    target_w = max(self._preferred_dock_width, self._dock.width())
-
-                    QTimer.singleShot(0, lambda: win.resizeDocks([self._dock], [target_w], Qt.Orientation.Horizontal))
-
-            else:
-
-                if self._dock.width() > 260:
-
-                    self._preferred_dock_width = self._dock.width()
-
-                if tray is not None and self._saved_tray_width:
-
-                    restore_w = self._saved_tray_width
-
-                    QTimer.singleShot(0, lambda: win.resizeDocks([tray], [restore_w], Qt.Orientation.Horizontal))
-
-        except Exception:
-
-            pass
+        self._check_panel_visibility()
 
 
 
@@ -9732,6 +9775,7 @@ class NodeEditorWidget(QWidget):
         except RuntimeError:
 
             return
+
 
 
 

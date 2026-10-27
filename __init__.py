@@ -71,7 +71,7 @@ except Exception:
 
 PLUGIN = {
     "name": "IngeTrazo Parametric Node Editor",
-    "version": "1.7.4",
+    "version": "1.7.5",
     "author": "seghier",
     "description": "Visual parametric node editor with Blender-style sliders, live viewport sync, and BIM tagging.",
 }
@@ -460,6 +460,8 @@ class IngeTrazoSceneBridge:
         self._is_internal_scene_bump: bool = False
         self._last_handled_version: Optional[int] = None
         self.on_scene_nodes_updated: Optional[Callable[[], None]] = None
+        self.editor_widget: Optional[Any] = None
+        self.is_panel_active_state: bool = False
         self.engine.on_evaluated = self._on_graph_evaluated
         self._setup_scene_listener()
         self.sanitize_scene_previews()
@@ -504,7 +506,6 @@ class IngeTrazoSceneBridge:
         """When user moves/edits scene geometry, find any SelectCurveNode / ReferenceFaceNode and sync!"""
         if self._is_internal_scene_bump:
             return
-        self.sanitize_scene_previews()
         changed_any = False
         for node in list(self.engine.nodes.values()):
             if hasattr(node, "sync_from_scene"):
@@ -545,14 +546,24 @@ class IngeTrazoSceneBridge:
             vp = getattr(self.app.window, "viewport", None)
         return vp
 
+    def _clear_internal_bump_flag(self) -> None:
+        self._is_internal_scene_bump = False
+
     def _bump_viewport(self) -> None:
         """Notifies IngeTrazo's OpenGL renderer that scene geometry changed."""
         self._is_internal_scene_bump = True
         try:
             sc = self.scene
             if sc is not None:
-                if hasattr(sc, "version"):
+                bump = getattr(sc, "bump_view", None)
+                if callable(bump):
+                    try:
+                        bump()
+                    except Exception:
+                        pass
+                elif hasattr(sc, "version"):
                     sc.version += 1
+                if hasattr(sc, "version"):
                     self._last_handled_version = sc.version
                 for fn_name in ("invalidate", "mark_dirty"):
                     fn = getattr(sc, fn_name, None)
@@ -561,12 +572,6 @@ class IngeTrazoSceneBridge:
                             fn()
                         except Exception:
                             pass
-
-            if hasattr(self.app, "notify_scene_changed"):
-                try:
-                    self.app.notify_scene_changed()
-                except Exception:
-                    pass
 
             vp = self.viewport
             if vp is not None:
@@ -577,8 +582,15 @@ class IngeTrazoSceneBridge:
                             fn()
                         except Exception:
                             pass
+                try:
+                    from PySide6.QtCore import QTimer
+                    QTimer.singleShot(0, lambda: vp.update() if vp is not None else None)
+                    QTimer.singleShot(60, lambda: vp.update() if vp is not None else None)
+                except Exception:
+                    pass
         finally:
-            self._is_internal_scene_bump = False
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(100, self._clear_internal_bump_flag)
 
     def on_nodes_selected(self, selected_node_ids: List[str]) -> None:
         """Highlights the geometry of currently selected canvas node(s) in the 3D viewport."""
@@ -586,13 +598,15 @@ class IngeTrazoSceneBridge:
         if sc is None or not hasattr(sc, "selection"):
             return
 
-        # Discard previous preview group selections
+        # Discard previous preview group selections and ephemeral [Selected] groups
         to_discard = [g for g in sc.selection if is_preview_group(g)]
         for g in to_discard:
             try:
                 sc.selection.discard(g)
             except Exception:
                 pass
+        sc.groups[:] = [g for g in sc.groups if not (getattr(g, "name", "").startswith("[Selected] "))]
+
 
         if not selected_node_ids:
             self._bump_viewport()
@@ -644,8 +658,19 @@ class IngeTrazoSceneBridge:
         """Removes any pre-existing or stale [Preview] groups loaded from previous .igz files."""
         self.clear_preview(refresh=False)
 
+    def is_editor_active(self) -> bool:
+        """Determines whether the Node Editor tab/window is currently active to the user."""
+        ed = getattr(self, "editor_widget", None)
+        if ed is not None and hasattr(ed, "is_panel_active"):
+            try:
+                return bool(ed.is_panel_active())
+            except Exception:
+                pass
+        return getattr(self, "is_panel_active_state", True)
+
     def on_panel_visibility_changed(self, visible: bool) -> None:
         """Called whenever the Node Editor dock tab or floating window is shown or hidden."""
+        self.is_panel_active_state = bool(visible)
         if not visible:
             self.clear_preview(refresh=True)
         else:
@@ -666,7 +691,7 @@ class IngeTrazoSceneBridge:
                     sc.selection.discard(g)
                 except Exception:
                     pass
-        if refresh and len(sc.groups) != before:
+        if refresh:
             self._bump_viewport()
 
     def set_live_sync(self, enabled: bool) -> None:
@@ -687,6 +712,10 @@ class IngeTrazoSceneBridge:
         if not self.live_sync or self.scene is None:
             return
 
+        if not self.is_editor_active():
+            self.clear_preview(refresh=False)
+            return
+
         self.clear_preview(refresh=False)
         graph_dict = self.engine.to_dict()
 
@@ -698,6 +727,7 @@ class IngeTrazoSceneBridge:
                 preview_data.name = f"[Preview] {mdata.name}"
                 grp = _make_ingetrazo_group(preview_data, graph_dict, is_preview=True, scene=self.scene)
                 self.scene.groups.append(grp)
+
 
             # Render preview points as 3D crosshairs inside a single preview group
             if points:
@@ -844,6 +874,9 @@ class NodeEditorDialog(QDialog):
             on_node_selection_changed=self.bridge.on_nodes_selected,
             parent=self,
         )
+        self.editor_widget._bridge = self.bridge
+        self.bridge.editor_widget = self.editor_widget
+        self.bridge.is_panel_active_state = True
         self.bridge.on_scene_nodes_updated = self.editor_widget.scene.update_all_badges
 
         footer = QWidget()
@@ -1015,6 +1048,8 @@ def setup(app: Any) -> None:
             on_node_selection_changed=bridge.on_nodes_selected,
             on_panel_visibility_changed=bridge.on_panel_visibility_changed,
         )
+        editor_widget._bridge = bridge
+        bridge.editor_widget = editor_widget
         bridge.on_scene_nodes_updated = editor_widget.scene.update_all_badges
 
         # Register as a dock tab in the side tray (beside Properties, BIM, Solid Inspector)
@@ -1056,7 +1091,15 @@ def setup(app: Any) -> None:
                             and not win.tabifiedDockWidgets(dock)
                             and win.dockWidgetArea(dock) == win.dockWidgetArea(tray)):
                         win.tabifyDockWidget(tray, dock)
+                    if hasattr(editor_widget, "_hook_dock_tab_bars"):
+                        editor_widget._hook_dock_tab_bars()
+                    if hasattr(editor_widget, "_check_panel_visibility"):
+                        editor_widget._check_panel_visibility()
                 QTimer.singleShot(0, _join_tray)
+                if hasattr(editor_widget, "_hook_dock_tab_bars"):
+                    QTimer.singleShot(150, editor_widget._hook_dock_tab_bars)
+                QTimer.singleShot(200, bridge.sanitize_scene_previews)
+                QTimer.singleShot(600, bridge.sanitize_scene_previews)
 
     except Exception as ex:
         import logging

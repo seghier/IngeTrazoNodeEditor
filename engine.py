@@ -315,8 +315,6 @@ class GraphEngine:
             if (
                 (getattr(node, "is_output_node", False) or getattr(node, "type_id", "") == "scene.preview")
                 and getattr(node, "is_enabled", True)
-                and getattr(node, "is_preview_visible", True)
-                and node.param_values.get("enabled", True)
                 and not node.error_message
             ):
                 for w in self.wires:

@@ -71,12 +71,64 @@ except Exception:
 
 PLUGIN = {
     "name": "IngeTrazo Parametric Node Editor",
-    "version": "1.7.3",
+    "version": "1.7.4",
     "author": "seghier",
     "description": "Visual parametric node editor with Blender-style sliders, live viewport sync, and BIM tagging.",
 }
 
 PREVIEW_TAG = "_ingetrazo_node_preview"
+
+
+def is_preview_group(g: Any) -> bool:
+    """Returns True if the group is a transient Node Editor live-preview or selection highlight."""
+    if hasattr(g, "ext") and isinstance(g.ext, dict) and g.ext.get(PREVIEW_TAG):
+        return True
+    name = getattr(g, "name", None)
+    if isinstance(name, str) and (
+        name.startswith("[Preview] ")
+        or name.startswith("[Selected] ")
+        or name == "[Preview] Points"
+    ):
+        return True
+    return False
+
+
+def _install_igz_save_filter() -> None:
+    """
+    Wraps IngeTrazo's `formats.igz.save_scene` so that preview groups
+    tagged with `PREVIEW_TAG` or named `[Preview] ...` are completely excluded
+    from being serialized into `.igz` files (both manual saves and autosaves).
+    """
+    try:
+        igz_mod = None
+        try:
+            import formats.igz as igz_mod
+        except ImportError:
+            pass
+        if igz_mod is None and "formats.igz" in sys.modules:
+            igz_mod = sys.modules["formats.igz"]
+        if igz_mod is None or getattr(igz_mod, "_node_editor_save_filter_installed", False):
+            return
+        orig_save_scene = igz_mod.save_scene
+
+        def _safe_save_scene(scene: Any, path: Any, *args: Any, **kwargs: Any) -> Any:
+            groups = getattr(scene, "groups", None)
+            if groups:
+                preview_groups = [g for g in groups if is_preview_group(g)]
+                if preview_groups:
+                    clean_groups = [g for g in groups if not is_preview_group(g)]
+                    try:
+                        scene.groups = clean_groups
+                        return orig_save_scene(scene, path, *args, **kwargs)
+                    finally:
+                        scene.groups = groups
+            return orig_save_scene(scene, path, *args, **kwargs)
+
+        igz_mod.save_scene = _safe_save_scene
+        igz_mod._node_editor_save_filter_installed = True
+    except Exception as ex:
+        import logging
+        logging.getLogger("ingetrazo.plugins").warning(f"Could not install igz save filter: {ex}")
 
 
 def _populate_ingetrazo_mesh(target_mesh: Any, mesh_data: MeshData, scene: Optional[Any] = None) -> None:
@@ -410,6 +462,7 @@ class IngeTrazoSceneBridge:
         self.on_scene_nodes_updated: Optional[Callable[[], None]] = None
         self.engine.on_evaluated = self._on_graph_evaluated
         self._setup_scene_listener()
+        self.sanitize_scene_previews()
 
     def _setup_scene_listener(self) -> None:
         """Connects viewport sceneVersionChanged signal and a fallback QTimer to detect external geometry moves."""
@@ -451,6 +504,7 @@ class IngeTrazoSceneBridge:
         """When user moves/edits scene geometry, find any SelectCurveNode / ReferenceFaceNode and sync!"""
         if self._is_internal_scene_bump:
             return
+        self.sanitize_scene_previews()
         changed_any = False
         for node in list(self.engine.nodes.values()):
             if hasattr(node, "sync_from_scene"):
@@ -533,12 +587,12 @@ class IngeTrazoSceneBridge:
             return
 
         # Discard previous preview group selections
-        to_discard = [
-            g for g in sc.selection
-            if hasattr(g, "ext") and isinstance(g.ext, dict) and g.ext.get(PREVIEW_TAG)
-        ]
+        to_discard = [g for g in sc.selection if is_preview_group(g)]
         for g in to_discard:
-            sc.selection.discard(g)
+            try:
+                sc.selection.discard(g)
+            except Exception:
+                pass
 
         if not selected_node_ids:
             self._bump_viewport()
@@ -547,8 +601,8 @@ class IngeTrazoSceneBridge:
         sel_set = set(selected_node_ids)
         matching = []
         for g in getattr(sc, "groups", []):
-            if hasattr(g, "ext") and isinstance(g.ext, dict) and g.ext.get(PREVIEW_TAG):
-                if g.ext.get("node_id") in sel_set:
+            if is_preview_group(g):
+                if hasattr(g, "ext") and isinstance(g.ext, dict) and g.ext.get("node_id") in sel_set:
                     matching.append(g)
 
         for g in matching:
@@ -586,16 +640,32 @@ class IngeTrazoSceneBridge:
 
         self._bump_viewport()
 
+    def sanitize_scene_previews(self) -> None:
+        """Removes any pre-existing or stale [Preview] groups loaded from previous .igz files."""
+        self.clear_preview(refresh=False)
+
+    def on_panel_visibility_changed(self, visible: bool) -> None:
+        """Called whenever the Node Editor dock tab or floating window is shown or hidden."""
+        if not visible:
+            self.clear_preview(refresh=True)
+        else:
+            if self.live_sync:
+                self.engine.evaluate()
+
     def clear_preview(self, refresh: bool = True) -> None:
-        """Removes transient live-preview groups from `scene.groups`."""
+        """Removes transient live-preview groups from `scene.groups` and `scene.selection`."""
         sc = self.scene
         if sc is None or not hasattr(sc, "groups"):
             return
         before = len(sc.groups)
-        sc.groups[:] = [
-            g for g in sc.groups
-            if not (hasattr(g, "ext") and isinstance(g.ext, dict) and g.ext.get(PREVIEW_TAG))
-        ]
+        sc.groups[:] = [g for g in sc.groups if not is_preview_group(g)]
+        if hasattr(sc, "selection") and sc.selection:
+            to_discard = [g for g in sc.selection if is_preview_group(g)]
+            for g in to_discard:
+                try:
+                    sc.selection.discard(g)
+                except Exception:
+                    pass
         if refresh and len(sc.groups) != before:
             self._bump_viewport()
 
@@ -903,6 +973,7 @@ def setup(app: Any) -> None:
     """Extension initialization called by IngeTrazo's core.extensions loader."""
     try:
         discover_nodes(reload_modules=False)
+        _install_igz_save_filter()
 
         win = getattr(app, "_window", None) or getattr(app, "window", None)
         if win:
@@ -942,6 +1013,7 @@ def setup(app: Any) -> None:
             on_load_selection=_handle_load_from_selection,
             get_app=lambda: app,
             on_node_selection_changed=bridge.on_nodes_selected,
+            on_panel_visibility_changed=bridge.on_panel_visibility_changed,
         )
         bridge.on_scene_nodes_updated = editor_widget.scene.update_all_badges
 
@@ -957,6 +1029,18 @@ def setup(app: Any) -> None:
             win._node_editor_widget = editor_widget
             win._node_editor_dock = dock
             win._node_editor_bridge = bridge
+
+            if hasattr(win, "_do_save") and not getattr(win, "_node_editor_save_hooked", False):
+                orig_win_do_save = win._do_save
+                def _safe_win_do_save(save_path: Any) -> Any:
+                    bridge.clear_preview(refresh=False)
+                    try:
+                        return orig_win_do_save(save_path)
+                    finally:
+                        if bridge.live_sync and editor_widget.isVisible():
+                            editor_widget.schedule_eval()
+                win._do_save = _safe_win_do_save
+                win._node_editor_save_hooked = True
             if hasattr(win, "setDockNestingEnabled"):
                 try:
                     win.setDockNestingEnabled(True)
@@ -993,6 +1077,10 @@ def unregister(app: Any) -> None:
         _ACTIVE_DIALOG = None
     win = getattr(app, "_window", None) or getattr(app, "window", None)
     if win:
+        bridge = getattr(win, "_node_editor_bridge", None)
+        if bridge:
+            bridge.clear_preview(refresh=True)
+            bridge.stop()
         editor = getattr(win, "_node_editor_widget", None)
         if editor and hasattr(editor, "_floating_window") and editor._floating_window:
             try:

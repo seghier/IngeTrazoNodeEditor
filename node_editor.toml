@@ -2,13 +2,13 @@
 # Copy this file to extensions/node_editor.toml in https://github.com/ingelibre/ingetrazo-extensions
 
 id = "node_editor"
-version = "1.7.3"
+version = "1.7.4"
 author = "seghier"
 author_url = "https://github.com/seghier"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/seghier/IngeTrazoNodeEditor"
-download = "https://github.com/seghier/IngeTrazoNodeEditor/releases/download/v1.7.3/node_editor.zip"
-sha256 = "7f974e23c7d58d5bcfe15526ca5604c8ee8b0f3962519a86ec9af19251c05ee8"
+download = "https://github.com/seghier/IngeTrazoNodeEditor/releases/download/v1.7.4/node_editor.zip"
+sha256 = "fb00389f497300d4aa38521154721b99114489417e3d93e2ac329331d29c83bb"
 ingetrazo = "0.5.7"
 tags = ["productivity", "architecture"]
 screenshot = "node_editor.png"

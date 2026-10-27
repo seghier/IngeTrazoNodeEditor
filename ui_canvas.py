@@ -8232,16 +8232,23 @@ class NodeEditorFloatingWindow(QMainWindow):
 
 
 
+    def hideEvent(self, event: Any) -> None:
+        super().hideEvent(event)
+        if hasattr(self._editor, "_notify_panel_visibility"):
+            self._editor._notify_panel_visibility(False)
+
+    def showEvent(self, event: Any) -> None:
+        super().showEvent(event)
+        if hasattr(self._editor, "_notify_panel_visibility"):
+            self._editor._notify_panel_visibility(True)
+
     def closeEvent(self, event: Any) -> None:
-
         if self._is_host_closing:
-
             event.accept()
-
+            if hasattr(self._editor, "_notify_panel_visibility"):
+                self._editor._notify_panel_visibility(False)
         else:
-
             event.ignore()
-
             self._editor._dock_tab()
 
 
@@ -8266,6 +8273,8 @@ class NodeEditorWidget(QWidget):
 
         on_node_selection_changed: Optional[Callable[[List[str]], None]] = None,
 
+        on_panel_visibility_changed: Optional[Callable[[bool], None]] = None,
+
         parent: Optional[QWidget] = None,
 
     ) -> None:
@@ -8285,6 +8294,8 @@ class NodeEditorWidget(QWidget):
         self.get_app = get_app
 
         self.on_node_selection_changed = on_node_selection_changed
+
+        self._on_panel_visibility_changed: Optional[Callable[[bool], None]] = on_panel_visibility_changed
 
         self._dock: Optional[Any] = None
 
@@ -8406,6 +8417,23 @@ class NodeEditorWidget(QWidget):
 
 
 
+    def _notify_panel_visibility(self, visible: bool) -> None:
+        if self._on_panel_visibility_changed is not None:
+            try:
+                self._on_panel_visibility_changed(visible)
+            except Exception:
+                pass
+
+    def hideEvent(self, event: Any) -> None:
+        super().hideEvent(event)
+        if not self.is_floating():
+            self._notify_panel_visibility(False)
+
+    def showEvent(self, event: Any) -> None:
+        super().showEvent(event)
+        if not self.is_floating():
+            self._notify_panel_visibility(True)
+
     def _on_dock_visibility_changed(self, visible: bool) -> None:
 
         """
@@ -8413,12 +8441,15 @@ class NodeEditorWidget(QWidget):
         Preserves IngeTrazo's normal side-tray width for other tabs while allowing
 
         the Node Editor tab to have its own wider resizable width when active.
+        Also clears previews when dock is hidden and restores evaluation when shown.
 
         """
 
         if self.is_floating() or self._dock is None:
 
             return
+
+        self._notify_panel_visibility(visible)
 
         win = self.get_main_window()
 

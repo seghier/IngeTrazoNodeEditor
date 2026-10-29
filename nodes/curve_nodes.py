@@ -1828,6 +1828,7 @@ class PointInsertTool(Tool):
     description = "Click in 3D viewport to insert curve control points (Enter/Esc/double-click when done, Backspace to undo)."
     uses_snap = True
     vcb_label = "Point (X;Y;Z)"
+    qt_cursor = Qt.CursorShape.CrossCursor if Qt is not None else None
 
     def __init__(self, node: Any, on_change: Optional[Callable[[], None]] = None) -> None:
         super().__init__()
@@ -1835,32 +1836,52 @@ class PointInsertTool(Tool):
         self.on_change = on_change
         self.hover_point: Any = None
         self.viewport: Any = None
-        self.start_point: Any = True  # Marks tool as active/busy so Viewport.escape() calls on_cancel()
+        self.start_point: Optional[QVector3D] = None
+        self.dragging: bool = True  # Marks tool as having an operation in progress for Viewport._tool_busy
 
     def claims_key(self, key: int, modifiers: Any = None) -> bool:
-        """Claims Enter, Return, Escape, and Backspace keys so Viewport forwards key events to this tool."""
-        # Qt.Key_Return = 16777220, Qt.Key_Enter = 16777221, Qt.Key_Escape = 16777216, Qt.Key_Backspace = 16777219
-        return key in (16777220, 16777221, 16777216, 16777219)
+        """Claims Enter, Return, Escape, Backspace, and Delete keys so Viewport forwards key events to this tool."""
+        # Qt.Key_Return = 16777220, Qt.Key_Enter = 16777221, Qt.Key_Escape = 16777216, Qt.Key_Backspace = 16777219, Qt.Key_Delete = 16777223
+        return key in (16777220, 16777221, 16777216, 16777219, 16777223)
 
     def on_key(self, viewport: Any, key: int, modifiers: Any = None) -> bool:
         """Handles keyboard shortcuts during point placement."""
         if key in (16777220, 16777221, 16777216):  # Enter, Return, Escape -> Commit and finish
             self.finish(viewport)
             return True
-        elif key == 16777219:  # Backspace -> Undo last point
+        elif key in (16777219, 16777223):  # Backspace, Delete -> Undo last point
             return self.on_undo(viewport)
         return False
 
     def on_activate(self, viewport: Any) -> None:
         self.viewport = viewport
+        self.dragging = True
+        pts = self.node.param_values.get("stored_points", [])
+        if pts and QVector3D is not None:
+            last = pts[-1]
+            try:
+                if isinstance(last, QVector3D):
+                    self.start_point = last
+                elif hasattr(last, "x") and callable(last.x):
+                    self.start_point = QVector3D(float(last.x()), float(last.y()), float(last.z()))
+                elif hasattr(last, "x"):
+                    self.start_point = QVector3D(float(last.x), float(last.y), float(last.z))
+                elif isinstance(last, (list, tuple)) and len(last) >= 3:
+                    self.start_point = QVector3D(float(last[0]), float(last[1]), float(last[2]))
+            except Exception:
+                self.start_point = None
+        else:
+            self.start_point = None
+
         if Qt is not None and hasattr(viewport, "setCursor"):
             viewport.setCursor(Qt.CursorShape.CrossCursor)
         flash = getattr(viewport, "flash_status", None)
         if callable(flash):
-            pts = self.node.param_values.get("stored_points", [])
             flash(f"📍 Point Insertion Active: {len(pts)} existing points. Click in viewport to add points. Press Enter/Esc when finished.")
 
     def on_deactivate(self, viewport: Any) -> None:
+        self.dragging = False
+        self.start_point = None
         if hasattr(viewport, "unsetCursor"):
             viewport.unsetCursor()
         self.hover_point = None
@@ -1877,6 +1898,9 @@ class PointInsertTool(Tool):
         pts.append((round(px, 4), round(py, 4), round(pz, 4)))
         self.node.param_values["stored_points"] = pts
         self.node.is_dirty = True
+        if QVector3D is not None:
+            self.start_point = QVector3D(px, py, pz)
+        self.dragging = True
 
         app = getattr(self.node, "_app_ref", None) or getattr(getattr(ctx.viewport, "window", None), "_extension_app_handle", None)
         if self.node.param_values.get("handles_active", False):
@@ -1949,6 +1973,7 @@ class PointInsertTool(Tool):
         self.finish(viewport)
 
     def finish(self, viewport: Any) -> None:
+        self.dragging = False
         self.start_point = None
         win = viewport.window() if callable(getattr(viewport, "window", None)) else getattr(viewport, "window", None)
         if win and hasattr(win, "activate_select_tool"):
@@ -1994,6 +2019,22 @@ class PointInsertTool(Tool):
             popped = pts.pop()
             self.node.param_values["stored_points"] = pts
             self.node.is_dirty = True
+            if pts and QVector3D is not None:
+                last = pts[-1]
+                try:
+                    if isinstance(last, QVector3D):
+                        self.start_point = last
+                    elif hasattr(last, "x") and callable(last.x):
+                        self.start_point = QVector3D(float(last.x()), float(last.y()), float(last.z()))
+                    elif hasattr(last, "x"):
+                        self.start_point = QVector3D(float(last.x), float(last.y), float(last.z))
+                    elif isinstance(last, (list, tuple)) and len(last) >= 3:
+                        self.start_point = QVector3D(float(last[0]), float(last[1]), float(last[2]))
+                except Exception:
+                    self.start_point = None
+            else:
+                self.start_point = None
+
             app = getattr(self.node, "_app_ref", None) or getattr(getattr(viewport, "window", None), "_extension_app_handle", None)
             if self.node.param_values.get("handles_active", False):
                 self.node.spawn_handles(app)
@@ -2009,26 +2050,11 @@ class PointInsertTool(Tool):
             viewport.update()
             flash = getattr(viewport, "flash_status", None)
             if callable(flash):
-                flash(f"Removed last point ({popped[0]:.2f}, {popped[1]:.2f}, {popped[2]:.2f}). Remaining: {len(pts)}")
-            return True
-        return False
-
-    def on_value(self, viewport: Any, value: Any) -> bool:
-        if isinstance(value, (list, tuple)) and len(value) >= 3:
-            pts = list(self.node.param_values.get("stored_points", []))
-            pts.append((round(float(value[0]), 4), round(float(value[1]), 4), round(float(value[2]), 4)))
-            self.node.param_values["stored_points"] = pts
-            self.node.is_dirty = True
-            if callable(self.on_change):
-                self.on_change()
-            viewport.update()
+                flash(f"Undid point {popped} ({len(pts)} points remaining)")
             return True
         return False
 
 
-# ============================================================================
-# Viewport Curve Base Class
-# ============================================================================
 class ViewportCurveNodeBase(BaseNode):
     """Shared base class for curves supporting interactive viewport point insertion and draggable handles."""
 
@@ -2122,28 +2148,58 @@ class ViewportCurveNodeBase(BaseNode):
 
     def _resolve_app(self, app: Any = None) -> Any:
         app = app or getattr(self, "_app_ref", None)
-        if app is None:
-            try:
-                from PySide6.QtWidgets import QApplication
-                qapp = QApplication.instance()
+        if app is not None:
+            return app
+        try:
+            import sys
+            for mod_name in ("IngeTrazoNodeEditor", "__main__"):
+                mod = sys.modules.get(mod_name)
+                if mod and getattr(mod, "_ACTIVE_APP", None):
+                    return getattr(mod, "_ACTIVE_APP")
+        except Exception:
+            pass
+        try:
+            from PySide6.QtWidgets import QApplication
+            qapp = QApplication.instance()
+            if qapp is not None:
                 app = getattr(qapp, "_extension_app_handle", None)
-                if not app and qapp is not None:
-                    for w in qapp.topLevelWidgets():
-                        if hasattr(w, "viewport") or hasattr(w, "scene"):
-                            return w
-                        if hasattr(w, "_extension_app_handle"):
-                            return getattr(w, "_extension_app_handle")
-            except Exception:
-                pass
+                if app:
+                    return app
+                for w in qapp.topLevelWidgets():
+                    if hasattr(w, "viewport") or hasattr(w, "scene"):
+                        return w
+                    if hasattr(w, "_extension_app_handle"):
+                        return getattr(w, "_extension_app_handle")
+        except Exception:
+            pass
         return app
 
     def _resolve_context(self, app: Any = None) -> Tuple[Optional[Any], Optional[Any], Optional[Any]]:
         app = self._resolve_app(app)
-        if app is None:
-            return (None, None, None)
-        win = getattr(app, "_window", None) or getattr(app, "window", None) or app
-        vp = getattr(app, "viewport", None) or getattr(win, "viewport", None)
-        sc = getattr(app, "scene", None) or getattr(win, "scene", None) or (getattr(vp, "scene", None) if vp else None)
+        win = None
+        vp = None
+        sc = None
+        if app is not None:
+            win = getattr(app, "_window", None) or getattr(app, "window", None) or app
+            vp = getattr(app, "viewport", None) or getattr(win, "viewport", None)
+            sc = getattr(app, "scene", None) or getattr(win, "scene", None) or (getattr(vp, "scene", None) if vp else None)
+
+        if vp is None or not hasattr(vp, "set_active_tool"):
+            # Deep fallback: scan QApplication.allWidgets() for IngeTrazo Viewport
+            try:
+                from PySide6.QtWidgets import QApplication
+                qapp = QApplication.instance()
+                if qapp is not None:
+                    for w in qapp.allWidgets():
+                        if type(w).__name__ == "Viewport" and hasattr(w, "set_active_tool"):
+                            vp = w
+                            win = w.window()
+                            app = getattr(win, "_extension_app_handle", None) or win
+                            sc = getattr(w, "scene", None) or getattr(win, "scene", None)
+                            break
+            except Exception:
+                pass
+
         return (app, sc, vp)
 
     def insert_points(self, app: Any = None) -> Tuple[str, bool]:
@@ -2161,6 +2217,11 @@ class ViewportCurveNodeBase(BaseNode):
 
         tool = PointInsertTool(self, on_change=_on_points_changed)
         vp.set_active_tool(tool)
+        if hasattr(vp, "setFocus"):
+            try:
+                vp.setFocus()
+            except Exception:
+                pass
         return ("Point insertion active in viewport", True)
 
     def toggle_handles(self, app: Any = None) -> Tuple[str, bool]:

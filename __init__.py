@@ -1091,6 +1091,12 @@ def setup(app: Any) -> None:
         win = getattr(app, "_window", None) or getattr(app, "window", None)
         if win:
             win._extension_app_handle = app
+        try:
+            qapp = QApplication.instance()
+            if qapp:
+                qapp._extension_app_handle = app
+        except Exception:
+            pass
 
         engine = GraphEngine()
         bridge = IngeTrazoSceneBridge(app, engine)

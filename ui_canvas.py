@@ -6969,7 +6969,8 @@ class FlowLayout(QLayout):
 class NodeRibbonBar(QWidget):
     """
     Top category ribbon tabs for quick one-click node placement.
-    Features responsive FlowLayout wrapping and CAD-style subcategory card containers.
+    Features responsive FlowLayout wrapping, dynamic auto-fitting height,
+    and CAD-style subcategory card containers.
     """
     def __init__(
         self,
@@ -6984,20 +6985,24 @@ class NodeRibbonBar(QWidget):
         self._build_ui()
 
     def _build_ui(self) -> None:
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         self.setMinimumWidth(0)
 
         self.tab_widget = QTabWidget(self)
+        self.tab_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.tab_widget.setDocumentMode(True)
         self.tab_widget.setTabPosition(QTabWidget.TabPosition.North)
         self.tab_widget.setUsesScrollButtons(True)
         self.tab_widget.setMinimumWidth(0)
+        self.tab_widget.currentChanged.connect(lambda _idx: self._adjust_ribbon_height())
         layout.addWidget(self.tab_widget)
 
         self.populate_categories()
         self.apply_theme(self.is_dark)
+        self._adjust_ribbon_height()
 
     def populate_categories(self) -> None:
         self.tab_widget.clear()
@@ -7035,9 +7040,8 @@ class NodeRibbonBar(QWidget):
             scroll.setWidgetResizable(True)
             scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
             scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-            scroll.setMinimumHeight(66)
-            scroll.setMaximumHeight(220)
             scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
             container = QWidget()
             container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -7094,9 +7098,43 @@ class NodeRibbonBar(QWidget):
             page_layout.addWidget(scroll)
 
             page._orig_category = cat
+            page._scroll_area = scroll
+            page._container = container
+            page._container_layout = container_layout
             self.tab_widget.addTab(page, tr(cat))
 
         self.apply_theme(self.is_dark)
+        self._adjust_ribbon_height()
+        QTimer.singleShot(30, self._adjust_ribbon_height)
+
+    def _adjust_ribbon_height(self) -> None:
+        """Dynamically adjusts ribbon scroll area height to tightly fit the current tab's content."""
+        page = self.tab_widget.currentWidget()
+        if page is None:
+            return
+        scroll = getattr(page, "_scroll_area", None)
+        container_layout = getattr(page, "_container_layout", None)
+        if scroll is None or container_layout is None:
+            return
+
+        vp = scroll.viewport()
+        avail_w = vp.width() if vp and vp.width() > 10 else (self.width() - 10 if self.width() > 10 else 600)
+        needed_h = container_layout.heightForWidth(avail_w)
+        # Clamped so 1 row is ~48-52px, 2 rows ~96px, and cap at 165px to prevent pushing canvas down
+        clamped_h = max(46, min(165, needed_h + 2))
+        scroll.setFixedHeight(clamped_h)
+        self.updateGeometry()
+
+    def resizeEvent(self, event: Any) -> None:
+        super().resizeEvent(event)
+        self._adjust_ribbon_height()
+
+    def sizeHint(self) -> QSize:
+        page = self.tab_widget.currentWidget()
+        scroll = getattr(page, "_scroll_area", None) if page else None
+        scroll_h = scroll.height() if scroll else 52
+        tab_h = self.tab_widget.tabBar().sizeHint().height() if self.tab_widget.tabBar() else 26
+        return QSize(self.width(), tab_h + scroll_h)
 
     def retranslate_ui(self) -> None:
         for idx in range(self.tab_widget.count()):
@@ -7110,6 +7148,7 @@ class NodeRibbonBar(QWidget):
             orig_sub = lbl.property("orig_subcat")
             if orig_sub:
                 lbl.setText(tr(orig_sub))
+        self._adjust_ribbon_height()
 
     def apply_theme(self, is_dark: bool) -> None:
         self.is_dark = is_dark

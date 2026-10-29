@@ -71,7 +71,7 @@ except Exception:
 
 PLUGIN = {
     "name": "IngeTrazo Parametric Node Editor",
-    "version": "1.7.6",
+    "version": "1.7.7",
     "author": "seghier",
     "description": "Visual parametric node editor with Blender-style sliders, live viewport sync, and BIM tagging.",
 }
@@ -81,66 +81,9 @@ PREVIEW_TAG = "_ingetrazo_node_preview"
 
 
 def is_preview_group(g: Any) -> bool:
-    """Returns True if the group is a transient Node Editor live-preview or selection highlight."""
-    if hasattr(g, "ext") and isinstance(g.ext, dict) and g.ext.get(PREVIEW_TAG):
-        return True
-    name = getattr(g, "name", None)
-    if isinstance(name, str) and (
-        name.startswith("[Preview] ")
-        or name.startswith("[Selected] ")
-        or name == "[Preview] Points"
-    ):
-        return True
-    return False
-
-
-def _install_igz_save_filter() -> None:
-    """
-    Wraps IngeTrazo's `formats.igz.save_scene` so that preview groups
-    tagged with `PREVIEW_TAG` or named `[Preview] ...` are completely excluded
-    from being serialized into `.igz` files (both manual saves and autosaves).
-    """
-    try:
-        igz_mod = None
-        try:
-            import formats.igz as igz_mod
-        except ImportError:
-            pass
-        if igz_mod is None and "formats.igz" in sys.modules:
-            igz_mod = sys.modules["formats.igz"]
-        if igz_mod is None or getattr(igz_mod, "_node_editor_save_filter_installed", False):
-            return
-        orig_save_scene = igz_mod.save_scene
-
-        def _safe_save_scene(scene: Any, path: Any, *args: Any, **kwargs: Any) -> Any:
-            try:
-                if hasattr(scene, "plugin_data"):
-                    if scene.plugin_data is None:
-                        scene.plugin_data = {}
-                    app = getattr(sys.modules.get(__name__), "_ACTIVE_APP", None)
-                    win = getattr(app, "_window", None) or getattr(app, "window", None) if app else None
-                    ed = getattr(win, "_node_editor_widget", None) if win else None
-                    if ed and hasattr(ed, "engine") and getattr(ed.engine, "nodes", None):
-                        scene.plugin_data["node_editor"] = ed.engine.to_dict()
-            except Exception:
-                pass
-            groups = getattr(scene, "groups", None)
-            if groups:
-                preview_groups = [g for g in groups if is_preview_group(g)]
-                if preview_groups:
-                    clean_groups = [g for g in groups if not is_preview_group(g)]
-                    try:
-                        scene.groups = clean_groups
-                        return orig_save_scene(scene, path, *args, **kwargs)
-                    finally:
-                        scene.groups = groups
-            return orig_save_scene(scene, path, *args, **kwargs)
-
-        igz_mod.save_scene = _safe_save_scene
-        igz_mod._node_editor_save_filter_installed = True
-    except Exception as ex:
-        import logging
-        logging.getLogger("ingetrazo.plugins").warning(f"Could not install igz save filter: {ex}")
+    """Returns True if the group is tagged as an ephemeral Node Editor preview."""
+    ext = getattr(g, "ext", None)
+    return isinstance(ext, dict) and bool(ext.get(PREVIEW_TAG))
 
 
 def _soften_and_apply_cad_edges(target_mesh: Any, mesh_data: MeshData) -> None:
@@ -527,10 +470,187 @@ class IngeTrazoSceneBridge:
         self._last_handled_version: Optional[int] = None
         self.on_scene_nodes_updated: Optional[Callable[[], None]] = None
         self.editor_widget: Optional[Any] = None
-        self.is_panel_active_state: bool = False
+        self.is_panel_active_state: bool = True
+        self._overlay_installed: bool = False
+        self._preview_meshes: List[MeshData] = []
+        self._preview_points: List[Vec3] = []
+        self._selected_node_ids: set[str] = set()
+        self.last_synced_doc_data: Optional[str] = None
+
+        from PySide6.QtCore import QTimer
+        self._doc_save_timer = QTimer()
+        self._doc_save_timer.setSingleShot(True)
+        self._doc_save_timer.setInterval(350)
+        self._doc_save_timer.timeout.connect(self._commit_graph_to_doc_data)
+
         self.engine.on_evaluated = self._on_graph_evaluated
         self._setup_scene_listener()
         self.sanitize_scene_previews()
+
+    def setup_overlay(self) -> None:
+        """Registers the 3D preview overlay so previews draw over the viewport without touching scene.groups or files."""
+        if self._overlay_installed:
+            return
+        if hasattr(self.app, "add_overlay"):
+            try:
+                self.app.add_overlay(self._draw_overlay)
+                self._overlay_installed = True
+            except Exception as ex:
+                import logging
+                logging.getLogger("ingetrazo.plugins").warning(f"Could not register viewport overlay: {ex}")
+
+    def _draw_overlay(self, viewport: Any, painter: Any) -> None:
+        """
+        Draws live preview geometry (points, curves, wireframes, and shaded solids)
+        directly onto the IngeTrazo viewport canvas without touching scene.groups.
+        """
+        if not self.live_sync or not self.is_editor_active():
+            return
+        if not self._preview_meshes and not self._preview_points:
+            return
+
+        try:
+            from PySide6.QtCore import QLineF, QPointF, Qt
+            from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
+
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+            # 1. Collect all points to project in one batch
+            pts_list = []
+            mesh_offsets = []
+            for m in self._preview_meshes:
+                mesh_offsets.append(len(pts_list))
+                pts_list.extend(m.vertices)
+
+            pts_offset = len(pts_list)
+            for p in self._preview_points:
+                pts_list.append((p.x, p.y, p.z))
+
+            if not pts_list:
+                return
+
+            if hasattr(self.app, "world_to_pixels"):
+                px, py, ok = self.app.world_to_pixels(pts_list)
+            elif hasattr(viewport, "world_to_pixels"):
+                px, py, ok = viewport.world_to_pixels(pts_list)
+            else:
+                return
+
+            # Camera position for depth-sorting
+            cam = getattr(viewport, "camera", None)
+            cam_eye = None
+            if cam is not None and hasattr(cam, "eye"):
+                try:
+                    eye_pt = cam.eye()
+                    cam_eye = (eye_pt.x(), eye_pt.y(), eye_pt.z())
+                except Exception:
+                    pass
+            if cam_eye is None and cam is not None and hasattr(cam, "target"):
+                cam_eye = (cam.target.x(), cam.target.y(), cam.target.z())
+            if cam_eye is None:
+                cam_eye = (0.0, 0.0, 0.0)
+
+            # Sun/light vector for diffuse face shading
+            lx, ly, lz = 0.38, -0.57, 0.72
+
+            # 2. Draw Meshes
+            for m_idx, m in enumerate(self._preview_meshes):
+                offset = mesh_offsets[m_idx]
+                is_selected = m.source_node_id in self._selected_node_ids if m.source_node_id else False
+
+                if is_selected:
+                    base_r, base_g, base_b = 1.0, 0.74, 0.18
+                    alpha = 0.88
+                    wire_color = QColor(255, 220, 60, 255)
+                    wire_w = 2.0
+                else:
+                    if m.color is not None and len(m.color) >= 3:
+                        base_r, base_g, base_b = float(m.color[0]), float(m.color[1]), float(m.color[2])
+                    else:
+                        base_r, base_g, base_b = 0.58, 0.65, 0.85
+                    alpha = float(m.opacity) if m.opacity is not None else 0.85
+                    wire_color = QColor.fromRgbF(
+                        max(0.0, base_r - 0.28), max(0.0, base_g - 0.28), max(0.0, base_b - 0.28), 0.95
+                    )
+                    wire_w = 1.2
+
+                # A. Faces (draw if present)
+                if m.faces:
+                    drawable_faces = []
+                    for f in m.faces:
+                        if len(f) < 3:
+                            continue
+                        global_indices = [offset + vi for vi in f]
+                        if not all(ok[gi] for gi in global_indices):
+                            continue
+
+                        # Calculate face normal from first 3 vertices
+                        v0 = pts_list[global_indices[0]]
+                        v1 = pts_list[global_indices[1]]
+                        v2 = pts_list[global_indices[2]]
+                        e1x, e1y, e1z = v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2]
+                        e2x, e2y, e2z = v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2]
+                        nx = e1y * e2z - e1z * e2y
+                        ny = e1z * e2x - e1x * e2z
+                        nz = e1x * e2y - e1y * e2x
+                        nlen = (nx * nx + ny * ny + nz * nz) ** 0.5
+                        if nlen > 1e-8:
+                            dot = (nx * lx + ny * ly + nz * lz) / nlen
+                            shade = 0.42 + 0.58 * max(0.0, dot)
+                        else:
+                            shade = 0.72
+
+                        face_col = QColor.fromRgbF(
+                            min(1.0, base_r * shade),
+                            min(1.0, base_g * shade),
+                            min(1.0, base_b * shade),
+                            alpha,
+                        )
+                        poly = QPolygonF([QPointF(float(px[gi]), float(py[gi])) for gi in global_indices])
+
+                        # Distance from camera eye for back-to-front depth sorting
+                        fc_x = sum(pts_list[gi][0] for gi in global_indices) / len(global_indices)
+                        fc_y = sum(pts_list[gi][1] for gi in global_indices) / len(global_indices)
+                        fc_z = sum(pts_list[gi][2] for gi in global_indices) / len(global_indices)
+                        dist_sq = (fc_x - cam_eye[0]) ** 2 + (fc_y - cam_eye[1]) ** 2 + (fc_z - cam_eye[2]) ** 2
+                        drawable_faces.append((dist_sq, poly, face_col))
+
+                    # Sort back-to-front (painter's algorithm)
+                    drawable_faces.sort(key=lambda item: item[0], reverse=True)
+                    painter.setPen(Qt.PenStyle.NoPen)
+                    for _, poly, col in drawable_faces:
+                        painter.setBrush(col)
+                        painter.drawPolygon(poly)
+
+                # B. Edges / Wireframes
+                if getattr(m, "show_wires", True) and m.edges:
+                    painter.setPen(QPen(wire_color, wire_w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                    lines = []
+                    for i, j in m.edges:
+                        gi, gj = offset + i, offset + j
+                        if ok[gi] and ok[gj]:
+                            lines.append(QLineF(float(px[gi]), float(py[gi]), float(px[gj]), float(py[gj])))
+                    if lines:
+                        painter.drawLines(lines)
+
+            # 3. Draw Points
+            if self._preview_points:
+                pt_pen = QPen(QColor(86, 210, 255, 235), 2.0, Qt.PenStyle.SolidLine)
+                painter.setPen(pt_pen)
+                arm = 3.5
+                pt_lines = []
+                for k in range(len(self._preview_points)):
+                    idx = pts_offset + k
+                    if ok[idx]:
+                        x, y = float(px[idx]), float(py[idx])
+                        pt_lines.append(QLineF(x - arm, y, x + arm, y))
+                        pt_lines.append(QLineF(x, y - arm, x, y + arm))
+                if pt_lines:
+                    painter.drawLines(pt_lines)
+
+        except Exception as ex:
+            import logging
+            logging.getLogger("ingetrazo.plugins").debug(f"NodeEditor overlay draw error: {ex}")
 
     def _setup_scene_listener(self) -> None:
         """Connects viewport sceneVersionChanged signal and a fallback QTimer to detect external geometry moves."""
@@ -597,6 +717,11 @@ class IngeTrazoSceneBridge:
                 self._scene_poll_timer.stop()
             except Exception:
                 pass
+        if hasattr(self, "_doc_save_timer") and self._doc_save_timer is not None:
+            try:
+                self._doc_save_timer.stop()
+            except Exception:
+                pass
 
     @property
     def scene(self) -> Any:
@@ -612,129 +737,36 @@ class IngeTrazoSceneBridge:
             vp = getattr(self.app.window, "viewport", None)
         return vp
 
-    def _clear_internal_bump_flag(self) -> None:
-        self._is_internal_scene_bump = False
-
     def _bump_viewport(self) -> None:
-        """Notifies IngeTrazo's OpenGL renderer that scene geometry changed."""
-        self._is_internal_scene_bump = True
-        try:
-            sc = self.scene
-            if sc is not None:
-                if hasattr(sc, "version"):
-                    sc.version += 1
-                bump = getattr(sc, "bump_view", None)
-                if callable(bump):
-                    try:
-                        bump()
-                    except Exception:
-                        pass
-                if hasattr(sc, "version"):
-                    self._last_handled_version = sc.version
-                for fn_name in ("invalidate", "mark_dirty"):
-                    fn = getattr(sc, fn_name, None)
-                    if callable(fn):
-                        try:
-                            fn()
-                        except Exception:
-                            pass
-
-            vp = self.viewport
-            if vp is not None:
-                if hasattr(vp, "_epoch_same"):
-                    vp._epoch_same = None
-                if hasattr(vp, "_placements_memo"):
-                    vp._placements_memo = None
-                if hasattr(vp, "_inst_pool"):
-                    vp._inst_pool = None
-                notify = getattr(vp, "notify_scene_changed", None)
-                if callable(notify):
-                    try:
-                        notify()
-                    except Exception:
-                        pass
-                for fn_name in ("invalidate_buffers", "mark_dirty", "update"):
-                    fn = getattr(vp, fn_name, None)
-                    if callable(fn):
-                        try:
-                            fn()
-                        except Exception:
-                            pass
+        """Triggers a viewport redraw without touching private attributes."""
+        vp = self.viewport
+        if vp is not None:
+            notify = getattr(vp, "notify_scene_changed", None)
+            if callable(notify):
                 try:
-                    from PySide6.QtCore import QTimer
-                    QTimer.singleShot(0, lambda: vp.update() if (vp is not None and hasattr(vp, 'update')) else None)
-                    QTimer.singleShot(30, lambda: vp.update() if (vp is not None and hasattr(vp, 'update')) else None)
+                    notify()
                 except Exception:
                     pass
-        finally:
-            from PySide6.QtCore import QTimer
-            QTimer.singleShot(100, self._clear_internal_bump_flag)
+            update_fn = getattr(vp, "update", None)
+            if callable(update_fn):
+                try:
+                    update_fn()
+                except Exception:
+                    pass
 
     def on_nodes_selected(self, selected_node_ids: List[str]) -> None:
-        """Highlights the geometry of currently selected canvas node(s) in the 3D viewport."""
-        sc = self.scene
-        if sc is None or not hasattr(sc, "selection"):
-            return
-
-        # Discard previous preview group selections and ephemeral [Selected] groups
-        to_discard = [g for g in sc.selection if is_preview_group(g)]
-        for g in to_discard:
-            try:
-                sc.selection.discard(g)
-            except Exception:
-                pass
-        sc.groups[:] = [g for g in sc.groups if not (getattr(g, "name", "").startswith("[Selected] "))]
-
-
-        if not selected_node_ids:
-            self._bump_viewport()
-            return
-
-        sel_set = set(selected_node_ids)
-        matching = []
-        for g in getattr(sc, "groups", []):
-            if is_preview_group(g):
-                if hasattr(g, "ext") and isinstance(g.ext, dict) and g.ext.get("node_id") in sel_set:
-                    matching.append(g)
-
-        for g in matching:
-            sc.selection.add(g)
-
-        # If a selected node is NOT in active preview (e.g. its output was wired downstream),
-        # extract its cached geometry directly and create an ephemeral selected preview group!
-        existing_nids = {g.ext.get("node_id") for g in matching}
-        missing_nids = sel_set - existing_nids
-        for nid in missing_nids:
-            node = self.engine.nodes.get(nid)
-            if node and getattr(node, "is_enabled", True) and not node.error_message:
-                for out_spec in node.outputs:
-                    val = node.cached_outputs.get(out_spec.id)
-                    if val is None:
-                        continue
-                    m_list = []
-                    if isinstance(val, MeshData):
-                        m_list.append(val)
-                    elif isinstance(val, CurveData):
-                        m_list.append(val.to_wire_mesh(name=f"{node.title}_Curve"))
-                    elif isinstance(val, list):
-                        for item in val:
-                            if isinstance(item, MeshData):
-                                m_list.append(item)
-                            elif isinstance(item, CurveData):
-                                m_list.append(item.to_wire_mesh(name=f"{node.title}_Curve"))
-                    for mdata in m_list:
-                        sel_mdata = mdata.copy()
-                        sel_mdata.source_node_id = nid
-                        sel_mdata.name = f"[Selected] {node.title}"
-                        sel_grp = _make_ingetrazo_group(sel_mdata, {}, is_preview=True, scene=sc)
-                        sc.groups.append(sel_grp)
-                        sc.selection.add(sel_grp)
-
-        self._bump_viewport()
+        """Highlights the geometry of currently selected canvas node(s) in the overlay."""
+        self._selected_node_ids = set(selected_node_ids)
+        if self.viewport is not None and hasattr(self.viewport, "update"):
+            self.viewport.update()
 
     def sanitize_scene_previews(self) -> None:
-        """Removes any pre-existing or stale [Preview] groups loaded from previous .igz files."""
-        self.clear_preview(refresh=False)
+        """Removes any legacy preview groups loaded from older .igz files."""
+        sc = self.scene
+        if sc is not None and hasattr(sc, "groups"):
+            sc.groups[:] = [g for g in sc.groups if not is_preview_group(g)]
+        if self.viewport is not None and hasattr(self.viewport, "update"):
+            self.viewport.update()
 
     def is_editor_active(self) -> bool:
         """Determines whether the Node Editor tab/window is currently active to the user."""
@@ -756,21 +788,14 @@ class IngeTrazoSceneBridge:
                 self.engine.evaluate()
 
     def clear_preview(self, refresh: bool = True) -> None:
-        """Removes transient live-preview groups from `scene.groups` and `scene.selection`."""
+        """Removes transient live-preview overlays and any legacy preview groups."""
+        self._preview_meshes.clear()
+        self._preview_points.clear()
         sc = self.scene
-        if sc is None or not hasattr(sc, "groups"):
-            return
-        before = len(sc.groups)
-        sc.groups[:] = [g for g in sc.groups if not is_preview_group(g)]
-        if hasattr(sc, "selection") and sc.selection:
-            to_discard = [g for g in sc.selection if is_preview_group(g)]
-            for g in to_discard:
-                try:
-                    sc.selection.discard(g)
-                except Exception:
-                    pass
-        if refresh:
-            self._bump_viewport()
+        if sc is not None and hasattr(sc, "groups"):
+            sc.groups[:] = [g for g in sc.groups if not is_preview_group(g)]
+        if refresh and self.viewport is not None and hasattr(self.viewport, "update"):
+            self.viewport.update()
 
     def set_live_sync(self, enabled: bool) -> None:
         self.live_sync = bool(enabled)
@@ -785,46 +810,108 @@ class IngeTrazoSceneBridge:
         points: List[Vec3],
         eval_ms: float,
     ) -> None:
-        """Streams transient preview geometry into IngeTrazo's viewport at 60 FPS."""
+        """Streams transient preview geometry into IngeTrazo's viewport overlay at 60 FPS."""
         self.last_error = None
-        if not self.live_sync or self.scene is None:
+        if not self.live_sync or not self.is_editor_active():
+            self._preview_meshes.clear()
+            self._preview_points.clear()
+            if self.viewport is not None and hasattr(self.viewport, "update"):
+                self.viewport.update()
             return
 
-        if not self.is_editor_active():
-            self.clear_preview(refresh=False)
-            return
+        self._preview_meshes = meshes
+        self._preview_points = points
+        if self.viewport is not None and hasattr(self.viewport, "update"):
+            self.viewport.update()
 
-        self.clear_preview(refresh=False)
+    def notify_graph_changed(self) -> None:
+        """Schedules debounced saving of the current graph to the document data."""
+        if hasattr(self, "_doc_save_timer") and self._doc_save_timer is not None:
+            self._doc_save_timer.start(350)
+
+    def _commit_graph_to_doc_data(self) -> None:
+        """Commits the current graph state into IngeTrazo's document data as one undo step."""
+        if not hasattr(self.app, "set_document_data"):
+            return
         graph_dict = self.engine.to_dict()
-
         try:
-            for mdata in meshes:
-                if not mdata.vertices and not mdata.edges:
-                    continue
-                preview_data = mdata.copy()
-                preview_data.name = f"[Preview] {mdata.name}"
-                grp = _make_ingetrazo_group(preview_data, graph_dict, is_preview=True, scene=self.scene)
-                self.scene.groups.append(grp)
+            import json
+            graph_json = json.dumps(graph_dict, sort_keys=True)
+            if graph_json != self.last_synced_doc_data:
+                self.last_synced_doc_data = graph_json
+                self.app.set_document_data(graph_dict)
+        except Exception as ex:
+            import logging
+            logging.getLogger("ingetrazo.plugins").debug(f"Could not save graph to document data: {ex}")
 
+    def restore_graph_from_document(self) -> bool:
+        """Restores the node graph from document data if present."""
+        saved = None
+        if hasattr(self.app, "document_data"):
+            try:
+                saved = self.app.document_data(default=None)
+            except TypeError:
+                try:
+                    saved = self.app.document_data()
+                except Exception:
+                    saved = None
+            except Exception:
+                saved = None
+        if not saved:
+            try:
+                sc = self.scene
+                pdata = getattr(sc, "plugin_data", {}) or {}
+                saved = pdata.get("node_editor", None)
+            except Exception:
+                saved = None
+        if saved and isinstance(saved, dict) and "nodes" in saved and saved["nodes"]:
+            try:
+                import json
+                self.last_synced_doc_data = json.dumps(saved, sort_keys=True)
+                self.engine.load_dict(saved)
+                if self.editor_widget is not None and hasattr(self.editor_widget, "scene"):
+                    self.editor_widget.scene.rebuild_from_engine()
+                    if self.live_sync and self.editor_widget.isVisible():
+                        self.editor_widget.schedule_eval()
+                return True
+            except Exception as ex:
+                import logging
+                logging.getLogger("ingetrazo.plugins").warning(f"Could not restore graph: {ex}")
+        return False
 
-            # Render preview points as 3D crosshairs inside a single preview group
-            if points:
-                pt_mesh = MeshData(name="[Preview] Points")
-                arm = 0.08
-                for p in points:
-                    base = len(pt_mesh.vertices)
-                    pt_mesh.vertices.extend([
-                        (p.x - arm, p.y, p.z), (p.x + arm, p.y, p.z),
-                        (p.x, p.y - arm, p.z), (p.x, p.y + arm, p.z),
-                        (p.x, p.y, p.z - arm), (p.x, p.y, p.z + arm),
-                    ])
-                    pt_mesh.edges.extend([(base, base + 1), (base + 2, base + 3), (base + 4, base + 5)])
-                grp_pts = _make_ingetrazo_group(pt_mesh, graph_dict, is_preview=True, scene=self.scene)
-                self.scene.groups.append(grp_pts)
-
-            self._bump_viewport()
-        except Exception as exc:
-            self.last_error = f"{type(exc).__name__}: {exc}"
+    def on_document_changed(self) -> None:
+        """
+        Called when IngeTrazo's document changes (an edit, an undo, New, Open).
+        Safely guards against overwriting unsaved graph changes on normal scene edits:
+        only reloads when the document's stored graph data genuinely changed from the outside.
+        """
+        if not hasattr(self.app, "document_data"):
+            return
+        try:
+            saved = self.app.document_data(default=None)
+        except TypeError:
+            try:
+                saved = self.app.document_data()
+            except Exception:
+                saved = None
+        except Exception:
+            saved = None
+        if not saved or not isinstance(saved, dict):
+            return
+        import json
+        saved_json = json.dumps(saved, sort_keys=True)
+        if saved_json == self.last_synced_doc_data:
+            return  # Same graph: normal scene geometry edit, do NOT overwrite canvas
+        self.last_synced_doc_data = saved_json
+        try:
+            self.engine.load_dict(saved)
+            if self.editor_widget is not None and hasattr(self.editor_widget, "scene"):
+                self.editor_widget.scene.rebuild_from_engine()
+                if self.live_sync and self.editor_widget.isVisible():
+                    self.editor_widget.schedule_eval()
+        except Exception as ex:
+            import logging
+            logging.getLogger("ingetrazo.plugins").warning(f"Could not restore graph on document change: {ex}")
 
     def bake_to_scene(self, specific_node_id: Optional[str] = None) -> int:
         """
@@ -863,11 +950,9 @@ class IngeTrazoSceneBridge:
             try:
                 from core.history import SnapshotImport
                 sig = inspect.signature(SnapshotImport.__init__)
-                # IngeTrazo's SnapshotImport(fn) takes a single callable `lambda s: ...`
                 if len(sig.parameters) <= 2:
                     cmd = SnapshotImport(_do_commit)
                     if hasattr(history, "execute"):
-                        # IngeTrazo's History.execute(cmd) takes only the command
                         history.execute(cmd)
                         committed = True
                     elif hasattr(history, "push"):
@@ -885,7 +970,7 @@ class IngeTrazoSceneBridge:
             except Exception as exc:
                 import logging
                 logging.getLogger("ingetrazo.plugins").error(f"Bake history commit failed: {exc}", exc_info=True)
-                committed = baked_count > 0  # never re-bake after a partial commit
+                committed = baked_count > 0
 
         if not committed:
             _do_commit(sc)
@@ -1084,19 +1169,9 @@ def setup(app: Any) -> None:
     """Extension initialization called by IngeTrazo's core.extensions loader."""
     global _ACTIVE_APP
     _ACTIVE_APP = app
-    try:
-        discover_nodes(reload_modules=False)
-        _install_igz_save_filter()
 
+    try:
         win = getattr(app, "_window", None) or getattr(app, "window", None)
-        if win:
-            win._extension_app_handle = app
-        try:
-            qapp = QApplication.instance()
-            if qapp:
-                qapp._extension_app_handle = app
-        except Exception:
-            pass
 
         engine = GraphEngine()
         bridge = IngeTrazoSceneBridge(app, engine)
@@ -1133,10 +1208,17 @@ def setup(app: Any) -> None:
             get_app=lambda: app,
             on_node_selection_changed=bridge.on_nodes_selected,
             on_panel_visibility_changed=bridge.on_panel_visibility_changed,
+            on_graph_changed=bridge.notify_graph_changed,
         )
         editor_widget._bridge = bridge
         bridge.editor_widget = editor_widget
         bridge.on_scene_nodes_updated = editor_widget.scene.update_all_badges
+
+        # Setup viewport overlay (previews draw cleanly without touching scene.groups or files)
+        bridge.setup_overlay()
+
+        # Restore graph on initial load if present in document_data
+        bridge.restore_graph_from_document()
 
         # Register as a dock tab in the side tray (beside Properties, BIM, Solid Inspector)
         dock = None
@@ -1151,74 +1233,12 @@ def setup(app: Any) -> None:
             win._node_editor_dock = dock
             win._node_editor_bridge = bridge
 
-            def _restore_graph_from_doc() -> None:
-                saved = None
-                if hasattr(app, "document_data"):
-                    try:
-                        saved = app.document_data(default=None)
-                    except Exception:
-                        saved = None
-                if not saved:
-                    try:
-                        sc = getattr(app, "scene", None) or getattr(getattr(app, "viewport", None), "scene", None)
-                        pdata = getattr(sc, "plugin_data", {}) or {}
-                        saved = pdata.get("node_editor", None)
-                    except Exception:
-                        saved = None
-                if saved and isinstance(saved, dict) and "nodes" in saved and saved["nodes"]:
-                    try:
-                        engine.load_dict(saved)
-                        editor_widget.scene.rebuild_from_engine()
-                        if bridge.live_sync:
-                            editor_widget.schedule_eval()
-                    except Exception as ex:
-                        import logging
-                        logging.getLogger("ingetrazo.plugins").warning(f"Could not restore node graph: {ex}")
-
-            if hasattr(app, "on_document_changed"):
-                try:
-                    app.on_document_changed(_restore_graph_from_doc)
-                except Exception:
-                    pass
-
-            if hasattr(win, "open_path") and not getattr(win, "_node_editor_open_hooked", False):
-                orig_win_open_path = win.open_path
-                def _safe_win_open_path(path: Any, *args: Any, **kwargs: Any) -> Any:
-                    res = orig_win_open_path(path, *args, **kwargs)
-                    _restore_graph_from_doc()
-                    return res
-                win.open_path = _safe_win_open_path
-                win._node_editor_open_hooked = True
-
-            if hasattr(win, "_do_save") and not getattr(win, "_node_editor_save_hooked", False):
-                orig_win_do_save = win._do_save
-                def _safe_win_do_save(save_path: Any) -> Any:
-                    try:
-                        graph_data = engine.to_dict()
-                        if hasattr(app, "set_document_data"):
-                            app.set_document_data(graph_data)
-                        sc = getattr(app, "scene", None) or getattr(getattr(app, "viewport", None), "scene", None)
-                        if sc is not None:
-                            if not hasattr(sc, "plugin_data") or sc.plugin_data is None:
-                                sc.plugin_data = {}
-                            sc.plugin_data["node_editor"] = graph_data
-                    except Exception:
-                        pass
-                    bridge.clear_preview(refresh=False)
-                    try:
-                        return orig_win_do_save(save_path)
-                    finally:
-                        if bridge.live_sync and editor_widget.isVisible():
-                            editor_widget.schedule_eval()
-                win._do_save = _safe_win_do_save
-                win._node_editor_save_hooked = True
             if hasattr(win, "setDockNestingEnabled"):
                 try:
                     win.setDockNestingEnabled(True)
                 except Exception:
                     pass
 
-            # Ensure the tab is tabified with the side tray
             if dock is not None:
                 from PySide6.QtCore import QTimer
                 def _join_tray():
@@ -1236,6 +1256,13 @@ def setup(app: Any) -> None:
                     QTimer.singleShot(150, editor_widget._hook_dock_tab_bars)
                 QTimer.singleShot(200, bridge.sanitize_scene_previews)
                 QTimer.singleShot(600, bridge.sanitize_scene_previews)
+
+        # Listen for document changes, safely filtering out normal scene edits
+        if hasattr(app, "on_document_changed"):
+            try:
+                app.on_document_changed(bridge.on_document_changed)
+            except Exception:
+                pass
 
     except Exception as ex:
         import logging

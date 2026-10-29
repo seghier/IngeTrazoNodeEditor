@@ -8331,6 +8331,7 @@ class NodeEditorWidget(QWidget):
         on_node_selection_changed: Optional[Callable[[List[str]], None]] = None,
 
         on_panel_visibility_changed: Optional[Callable[[bool], None]] = None,
+        on_graph_changed: Optional[Callable[[], None]] = None,
 
         parent: Optional[QWidget] = None,
 
@@ -8353,6 +8354,7 @@ class NodeEditorWidget(QWidget):
         self.on_node_selection_changed = on_node_selection_changed
 
         self._on_panel_visibility_changed: Optional[Callable[[bool], None]] = on_panel_visibility_changed
+        self.on_graph_changed: Optional[Callable[[], None]] = on_graph_changed
 
         self._dock: Optional[Any] = None
 
@@ -9930,6 +9932,11 @@ class NodeEditorWidget(QWidget):
         hist = getattr(self, "history", None)
         if hist is not None:
             hist.note_change()
+        if getattr(self, "on_graph_changed", None):
+            try:
+                self.on_graph_changed()
+            except Exception:
+                pass
 
         self._eval_timer.start()
 

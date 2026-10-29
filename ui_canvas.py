@@ -23,7 +23,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
 
-from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 
 from PySide6.QtGui import (
 
@@ -38,6 +38,7 @@ from PySide6.QtGui import (
 )
 
 from PySide6.QtWidgets import (
+    QLayout, QLayoutItem,
 
     QMainWindow,
 
@@ -6873,429 +6874,375 @@ class RibbonIconButton(QToolButton):
 
 
 
-class NodeRibbonBar(QWidget):
-
-    def __init__(
-
-        self,
-
-        on_node_clicked: Callable[[str], None],
-
-        is_dark: bool = True,
-
-        parent: Optional[QWidget] = None,
-
-    ) -> None:
-
+class FlowLayout(QLayout):
+    """
+    Responsive wrapping layout that arranges child widgets horizontally
+    and wraps them onto new lines as container width changes (like CSS flex-wrap).
+    """
+    def __init__(self, parent: Optional[QWidget] = None, margin: int = 0, h_spacing: int = 6, v_spacing: int = 6) -> None:
         super().__init__(parent)
+        self._items: List[QLayoutItem] = []
+        self._h_spacing = h_spacing
+        self._v_spacing = v_spacing
+        self.setContentsMargins(margin, margin, margin, margin)
 
+    def __del__(self) -> None:
+        while self._items:
+            self.takeAt(0)
+
+    def addItem(self, item: QLayoutItem) -> None:
+        self._items.append(item)
+
+    def horizontalSpacing(self) -> int:
+        return self._h_spacing
+
+    def verticalSpacing(self) -> int:
+        return self._v_spacing
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int) -> Optional[QLayoutItem]:
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index: int) -> Optional[QLayoutItem]:
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self) -> Qt.Orientation:
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return self._do_layout(QRect(0, 0, width, 0), apply_geometry=False)
+
+    def setGeometry(self, rect: QRect) -> None:
+        super().setGeometry(rect)
+        self._do_layout(rect, apply_geometry=True)
+
+    def sizeHint(self) -> QSize:
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        margins = self.contentsMargins()
+        size += QSize(margins.left() + margins.right(), margins.top() + margins.bottom())
+        return size
+
+    def _do_layout(self, rect: QRect, apply_geometry: bool = True) -> int:
+        margins = self.contentsMargins()
+        effective_rect = rect.adjusted(margins.left(), margins.top(), -margins.right(), -margins.bottom())
+        x = effective_rect.x()
+        y = effective_rect.y()
+        line_height = 0
+
+        for item in self._items:
+            widget = item.widget()
+            if widget is not None and not widget.isVisibleTo(widget.parentWidget()):
+                continue
+            item_size = item.sizeHint()
+            space_x = self.horizontalSpacing()
+            space_y = self.verticalSpacing()
+            next_x = x + item_size.width() + space_x
+            if next_x - space_x > effective_rect.right() and line_height > 0:
+                x = effective_rect.x()
+                y = y + line_height + space_y
+                next_x = x + item_size.width() + space_x
+                line_height = 0
+
+            if apply_geometry:
+                item.setGeometry(QRect(QPoint(x, y), item_size))
+
+            x = next_x
+            line_height = max(line_height, item_size.height())
+
+        return y + line_height - rect.y() + margins.bottom()
+
+
+class NodeRibbonBar(QWidget):
+    """
+    Top category ribbon tabs for quick one-click node placement.
+    Features responsive FlowLayout wrapping and CAD-style subcategory card containers.
+    """
+    def __init__(
+        self,
+        on_node_clicked: Callable[[str], None],
+        is_dark: bool = True,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
         self.on_node_clicked = on_node_clicked
-
         self.is_dark = is_dark
-
         self.buttons: List[RibbonIconButton] = []
-
         self._build_ui()
 
-
-
     def _build_ui(self) -> None:
-
         layout = QVBoxLayout(self)
-
         layout.setContentsMargins(0, 0, 0, 0)
-
         layout.setSpacing(0)
-
         self.setMinimumWidth(0)
 
-
-
         self.tab_widget = QTabWidget(self)
-
         self.tab_widget.setDocumentMode(True)
-
         self.tab_widget.setTabPosition(QTabWidget.TabPosition.North)
-
         self.tab_widget.setUsesScrollButtons(True)
-
         self.tab_widget.setMinimumWidth(0)
-
         layout.addWidget(self.tab_widget)
 
-
-
         self.populate_categories()
+        self.apply_theme(self.is_dark)
+
+    def populate_categories(self) -> None:
+        self.tab_widget.clear()
+        self.buttons.clear()
+
+        cat_map: Dict[str, List[type[BaseNode]]] = {}
+        seen_classes: Set[type[BaseNode]] = set()
+        for node_cls in NODE_REGISTRY.values():
+            if node_cls in seen_classes:
+                continue
+            seen_classes.add(node_cls)
+            cat = getattr(node_cls, "category", "Misc")
+            cat_map.setdefault(cat, []).append(node_cls)
+
+        pref_order = [
+            "Architecture", "Inputs", "Curves", "3D Solids",
+            "Transforms", "Material", "Points & Vectors",
+            "Math", "Lists", "Scene", "Scene Output", "B-Rep Solid"
+        ]
+        sorted_cats = [c for c in pref_order if c in cat_map]
+        for c in sorted(cat_map.keys()):
+            if c not in sorted_cats:
+                sorted_cats.append(c)
+
+        subcat_pref = ["Curves", "Solids", "Booleans", "Modifiers", "Output"]
+
+        for cat in sorted_cats:
+            node_classes = sorted(cat_map[cat], key=lambda cls: getattr(cls, "title", cls.type_id))
+            page = QWidget()
+            page_layout = QVBoxLayout(page)
+            page_layout.setContentsMargins(0, 0, 0, 0)
+            page_layout.setSpacing(0)
+
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            scroll.setMinimumHeight(66)
+            scroll.setMaximumHeight(220)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+            container = QWidget()
+            container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+            container_layout = FlowLayout(container, margin=5, h_spacing=6, v_spacing=6)
+
+            has_subcats = any(getattr(cls, "subcategory", None) for cls in node_classes)
+
+            if has_subcats:
+                # Group nodes by subcategory
+                sub_groups: Dict[str, List[type[BaseNode]]] = {}
+                for cls in node_classes:
+                    s_name = getattr(cls, "subcategory", None) or "General"
+                    sub_groups.setdefault(s_name, []).append(cls)
+
+                ordered_sub_names = [s for s in subcat_pref if s in sub_groups]
+                for s in sorted(sub_groups.keys()):
+                    if s not in ordered_sub_names:
+                        ordered_sub_names.append(s)
+
+                for s_name in ordered_sub_names:
+                    s_nodes = sub_groups[s_name]
+                    card = QFrame(container)
+                    card.setProperty("is_card", True)
+                    card_layout = QVBoxLayout(card)
+                    card_layout.setContentsMargins(4, 4, 4, 3)
+                    card_layout.setSpacing(2)
+
+                    btn_strip = QWidget(card)
+                    btn_strip_layout = QHBoxLayout(btn_strip)
+                    btn_strip_layout.setContentsMargins(0, 0, 0, 0)
+                    btn_strip_layout.setSpacing(3)
+
+                    for node_cls in s_nodes:
+                        btn = RibbonIconButton(node_cls, self.on_node_clicked, is_dark=self.is_dark, parent=btn_strip)
+                        self.buttons.append(btn)
+                        btn_strip_layout.addWidget(btn)
+
+                    card_layout.addWidget(btn_strip)
+
+                    sub_lbl = QLabel(tr(s_name), card)
+                    sub_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    sub_lbl.setProperty("is_subcat_label", True)
+                    sub_lbl.setProperty("orig_subcat", s_name)
+                    card_layout.addWidget(sub_lbl)
+
+                    container_layout.addWidget(card)
+            else:
+                for node_cls in node_classes:
+                    btn = RibbonIconButton(node_cls, self.on_node_clicked, is_dark=self.is_dark, parent=container)
+                    self.buttons.append(btn)
+                    container_layout.addWidget(btn)
+
+            scroll.setWidget(container)
+            page_layout.addWidget(scroll)
+
+            page._orig_category = cat
+            self.tab_widget.addTab(page, tr(cat))
 
         self.apply_theme(self.is_dark)
 
-
-
-    def populate_categories(self) -> None:
-
-        self.tab_widget.clear()
-
-        self.buttons.clear()
-
-
-
-        cat_map: Dict[str, List[type[BaseNode]]] = {}
-
-        seen_classes: Set[type[BaseNode]] = set()
-
-        for node_cls in NODE_REGISTRY.values():
-
-            if node_cls in seen_classes:
-
-                continue
-
-            seen_classes.add(node_cls)
-
-            cat = getattr(node_cls, "category", "Misc")
-
-            cat_map.setdefault(cat, []).append(node_cls)
-
-
-
-        pref_order = [
-
-            "Architecture", "Inputs", "Curves", "3D Solids",
-
-            "Transforms", "Material", "Points & Vectors",
-
-            "Math", "Lists", "Scene", "Scene Output"
-
-        ]
-
-        sorted_cats = [c for c in pref_order if c in cat_map]
-
-        for c in sorted(cat_map.keys()):
-
-            if c not in sorted_cats:
-
-                sorted_cats.append(c)
-
-
-
-        for cat in sorted_cats:
-
-            node_classes = sorted(cat_map[cat], key=lambda cls: getattr(cls, "title", cls.type_id))
-
-            page = QWidget()
-
-            page_layout = QVBoxLayout(page)
-
-            page_layout.setContentsMargins(0, 0, 0, 0)
-
-            page_layout.setSpacing(0)
-
-
-
-            scroll = QScrollArea()
-
-            scroll.setWidgetResizable(True)
-
-            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-
-            scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-
-            scroll.setFixedHeight(48)
-
-            scroll.setFrameShape(QFrame.Shape.NoFrame)
-
-
-
-            container = QWidget()
-
-            container_layout = QHBoxLayout(container)
-
-            container_layout.setContentsMargins(6, 4, 6, 4)
-
-            container_layout.setSpacing(4)
-
-
-
-            for node_cls in node_classes:
-
-                btn = RibbonIconButton(node_cls, self.on_node_clicked, is_dark=self.is_dark, parent=container)
-
-                self.buttons.append(btn)
-
-                container_layout.addWidget(btn)
-
-
-
-            container_layout.addStretch(1)
-
-            scroll.setWidget(container)
-
-            page_layout.addWidget(scroll)
-
-
-
-            page._orig_category = cat
-
-            self.tab_widget.addTab(page, tr(cat))
-
-
-
     def retranslate_ui(self) -> None:
-
         for idx in range(self.tab_widget.count()):
-
             page = self.tab_widget.widget(idx)
-
             orig_cat = getattr(page, "_orig_category", None)
-
             if orig_cat:
-
                 self.tab_widget.setTabText(idx, tr(orig_cat))
-
         for btn in self.buttons:
-
             btn.retranslate_ui()
-
-
+        for lbl in self.findChildren(QLabel):
+            orig_sub = lbl.property("orig_subcat")
+            if orig_sub:
+                lbl.setText(tr(orig_sub))
 
     def apply_theme(self, is_dark: bool) -> None:
-
         self.is_dark = is_dark
-
         for btn in self.buttons:
-
             btn.update_icon(is_dark)
 
-
-
         if is_dark:
-
             self.setStyleSheet("""
-
                 QTabWidget::pane {
-
                     border: none;
-
                     background: #1e2227;
-
                     border-bottom: 1px solid #3b4252;
-
                 }
-
                 QTabBar::tab {
-
                     background: #21252b;
-
                     color: #abb2bf;
-
                     padding: 3px 10px;
-
                     margin-right: 1px;
-
                     border-top-left-radius: 4px;
-
                     border-top-right-radius: 4px;
-
                     font-size: 11px;
-
                     font-weight: 500;
-
                 }
-
                 QTabBar::tab:hover {
-
                     background: #2c313a;
-
                     color: #ffffff;
-
                 }
-
                 QTabBar::tab:selected {
-
                     background: #1e2227;
-
                     color: #61afef;
-
                     border-bottom: 2px solid #61afef;
-
                 }
-
+                QFrame[is_card="true"] {
+                    background: #181b22;
+                    border: 1px solid #2d3340;
+                    border-radius: 5px;
+                }
+                QFrame[is_card="true"]:hover {
+                    border: 1px solid #3d4659;
+                }
+                QLabel[is_subcat_label="true"] {
+                    color: #7e8798;
+                    font-size: 9.5px;
+                    font-weight: 600;
+                    background: transparent;
+                    border: none;
+                    padding-top: 1px;
+                }
                 QScrollArea {
-
                     background: #1e2227;
-
                     border: none;
-
                 }
-
-                QScrollBar:horizontal {
-
-                    height: 4px;
-
-                    background: transparent;
-
+                QScrollBar:vertical {
+                    background: #181a1f;
+                    width: 7px;
+                    margin: 0;
                 }
-
-                QScrollBar::handle:horizontal {
-
-                    background: #4c566a;
-
-                    border-radius: 2px;
-
-                }
-
-                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
-
-                    width: 0px;
-
-                }
-
-                QToolButton {
-
-                    background: transparent;
-
-                    border: 1px solid transparent;
-
-                    border-radius: 5px;
-
-                    padding: 1px;
-
-                }
-
-                QToolButton:hover {
-
-                    background: #2c313a;
-
-                    border: 1px solid #61afef;
-
-                }
-
-                QToolButton:pressed {
-
+                QScrollBar::handle:vertical {
                     background: #3e4451;
-
+                    min-height: 16px;
+                    border-radius: 3px;
                 }
-
+                QScrollBar::handle:vertical:hover {
+                    background: #5c6370;
+                }
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                    height: 0;
+                }
             """)
-
         else:
-
             self.setStyleSheet("""
-
                 QTabWidget::pane {
-
                     border: none;
-
-                    background: #f3f5f8;
-
-                    border-bottom: 1px solid #d0d7de;
-
+                    background: #f5f6f8;
+                    border-bottom: 1px solid #dcdfe6;
                 }
-
                 QTabBar::tab {
-
-                    background: #e1e4e8;
-
-                    color: #4c566a;
-
+                    background: #e4e7ed;
+                    color: #606266;
                     padding: 3px 10px;
-
                     margin-right: 1px;
-
                     border-top-left-radius: 4px;
-
                     border-top-right-radius: 4px;
-
                     font-size: 11px;
-
                     font-weight: 500;
-
                 }
-
                 QTabBar::tab:hover {
-
-                    background: #d8dee9;
-
-                    color: #1e2227;
-
+                    background: #ebeef5;
+                    color: #000000;
                 }
-
                 QTabBar::tab:selected {
-
-                    background: #f3f5f8;
-
-                    color: #1976d2;
-
-                    border-bottom: 2px solid #1976d2;
-
+                    background: #ffffff;
+                    color: #409eff;
+                    border-bottom: 2px solid #409eff;
                 }
-
-                QScrollArea {
-
-                    background: #f3f5f8;
-
-                    border: none;
-
-                }
-
-                QScrollBar:horizontal {
-
-                    height: 4px;
-
-                    background: transparent;
-
-                }
-
-                QScrollBar::handle:horizontal {
-
-                    background: #c2c9d4;
-
-                    border-radius: 2px;
-
-                }
-
-                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
-
-                    width: 0px;
-
-                }
-
-                QToolButton {
-
-                    background: transparent;
-
-                    border: 1px solid transparent;
-
+                QFrame[is_card="true"] {
+                    background: #eaedf2;
+                    border: 1px solid #d0d5dd;
                     border-radius: 5px;
-
-                    padding: 1px;
-
                 }
-
-                QToolButton:hover {
-
-                    background: #e2e8f0;
-
-                    border: 1px solid #1976d2;
-
+                QFrame[is_card="true"]:hover {
+                    border: 1px solid #b8c0cc;
                 }
-
-                QToolButton:pressed {
-
-                    background: #cbd5e1;
-
+                QLabel[is_subcat_label="true"] {
+                    color: #555e6d;
+                    font-size: 9.5px;
+                    font-weight: 600;
+                    background: transparent;
+                    border: none;
+                    padding-top: 1px;
                 }
-
+                QScrollArea {
+                    background: #f5f6f8;
+                    border: none;
+                }
+                QScrollBar:vertical {
+                    background: #f0f2f5;
+                    width: 7px;
+                    margin: 0;
+                }
+                QScrollBar::handle:vertical {
+                    background: #c0c4cc;
+                    min-height: 16px;
+                    border-radius: 3px;
+                }
+                QScrollBar::handle:vertical:hover {
+                    background: #909399;
+                }
+                QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                    height: 0;
+                }
             """)
 
-
-
-
-
-# ============================================================================
-
-# MINIMAP NAVIGATOR (1:1 Parity with GeosNodeNetwork NodeGraphCanvas.Minimap.cs)
-
-# ============================================================================
 
 class MinimapCanvas(QWidget):
 

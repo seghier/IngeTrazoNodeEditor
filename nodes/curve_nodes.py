@@ -1835,6 +1835,21 @@ class PointInsertTool(Tool):
         self.on_change = on_change
         self.hover_point: Any = None
         self.viewport: Any = None
+        self.start_point: Any = True  # Marks tool as active/busy so Viewport.escape() calls on_cancel()
+
+    def claims_key(self, key: int, modifiers: Any = None) -> bool:
+        """Claims Enter, Return, Escape, and Backspace keys so Viewport forwards key events to this tool."""
+        # Qt.Key_Return = 16777220, Qt.Key_Enter = 16777221, Qt.Key_Escape = 16777216, Qt.Key_Backspace = 16777219
+        return key in (16777220, 16777221, 16777216, 16777219)
+
+    def on_key(self, viewport: Any, key: int, modifiers: Any = None) -> bool:
+        """Handles keyboard shortcuts during point placement."""
+        if key in (16777220, 16777221, 16777216):  # Enter, Return, Escape -> Commit and finish
+            self.finish(viewport)
+            return True
+        elif key == 16777219:  # Backspace -> Undo last point
+            return self.on_undo(viewport)
+        return False
 
     def on_activate(self, viewport: Any) -> None:
         self.viewport = viewport
@@ -1892,14 +1907,39 @@ class PointInsertTool(Tool):
         pts = self.node.param_values.get("stored_points", [])
         if not pts or QVector3D is None:
             return []
-        qvecs = [QVector3D(float(p[0]), float(p[1]), float(p[2])) for p in pts]
+        qvecs = []
+        for p in pts:
+            try:
+                if isinstance(p, QVector3D):
+                    qvecs.append(p)
+                elif hasattr(p, "x") and callable(p.x):
+                    qvecs.append(QVector3D(float(p.x()), float(p.y()), float(p.z())))
+                elif hasattr(p, "x"):
+                    qvecs.append(QVector3D(float(p.x), float(p.y), float(p.z)))
+                elif isinstance(p, (list, tuple)) and len(p) >= 3:
+                    qvecs.append(QVector3D(float(p[0]), float(p[1]), float(p[2])))
+            except Exception:
+                pass
         lines = []
         for i in range(len(qvecs) - 1):
             lines.append((qvecs[i], qvecs[i + 1]))
         if qvecs and self.hover_point is not None:
-            lines.append((qvecs[-1], self.hover_point))
-            if self.node.param_values.get("closed"):
-                lines.append((self.hover_point, qvecs[0]))
+            hp = None
+            try:
+                if isinstance(self.hover_point, QVector3D):
+                    hp = self.hover_point
+                elif hasattr(self.hover_point, "x") and callable(self.hover_point.x):
+                    hp = QVector3D(float(self.hover_point.x()), float(self.hover_point.y()), float(self.hover_point.z()))
+                elif hasattr(self.hover_point, "x"):
+                    hp = QVector3D(float(self.hover_point.x), float(self.hover_point.y), float(self.hover_point.z))
+                elif isinstance(self.hover_point, (list, tuple)) and len(self.hover_point) >= 3:
+                    hp = QVector3D(float(self.hover_point[0]), float(self.hover_point[1]), float(self.hover_point[2]))
+            except Exception:
+                pass
+            if hp is not None:
+                lines.append((qvecs[-1], hp))
+                if self.node.param_values.get("closed"):
+                    lines.append((hp, qvecs[0]))
         return lines
 
     def on_double_click(self, ctx: Any) -> None:
@@ -1909,15 +1949,40 @@ class PointInsertTool(Tool):
         self.finish(viewport)
 
     def finish(self, viewport: Any) -> None:
-        win = getattr(viewport, "window", None)
+        self.start_point = None
+        win = viewport.window() if callable(getattr(viewport, "window", None)) else getattr(viewport, "window", None)
         if win and hasattr(win, "activate_select_tool"):
-            win.activate_select_tool()
+            try:
+                win.activate_select_tool()
+            except Exception:
+                pass
         elif hasattr(viewport, "set_active_tool"):
-            viewport.set_active_tool(None)
+            try:
+                viewport.set_active_tool(None)
+            except Exception:
+                pass
         if hasattr(viewport, "unsetCursor"):
-            viewport.unsetCursor()
+            try:
+                viewport.unsetCursor()
+            except Exception:
+                pass
+        if hasattr(viewport, "update"):
+            try:
+                viewport.update()
+            except Exception:
+                pass
         if callable(self.on_change):
-            self.on_change()
+            try:
+                self.on_change()
+            except Exception:
+                pass
+        if hasattr(self.node, "_item_ref") and self.node._item_ref:
+            try:
+                self.node._item_ref._update_badge()
+                self.node._item_ref._update_action_buttons()
+                self.node._item_ref.update()
+            except Exception:
+                pass
         flash = getattr(viewport, "flash_status", None)
         if callable(flash):
             n = len(self.node.param_values.get("stored_points", []))
@@ -2146,11 +2211,30 @@ class ViewportCurveNodeBase(BaseNode):
         except ImportError:
             return "PySide6.QtGui not available"
 
+        def _make_handle_marker(rad: float = 0.08) -> Any:
+            m_obj = Mesh()
+            try:
+                v_pts = [
+                    QVector3D(rad, 0, 0), QVector3D(-rad, 0, 0),
+                    QVector3D(0, rad, 0), QVector3D(0, -rad, 0),
+                    QVector3D(0, 0, rad), QVector3D(0, 0, -rad),
+                ]
+                faces = [
+                    [v_pts[4], v_pts[0], v_pts[2]], [v_pts[4], v_pts[2], v_pts[1]],
+                    [v_pts[4], v_pts[1], v_pts[3]], [v_pts[4], v_pts[3], v_pts[0]],
+                    [v_pts[5], v_pts[2], v_pts[0]], [v_pts[5], v_pts[1], v_pts[2]],
+                    [v_pts[5], v_pts[3], v_pts[1]], [v_pts[5], v_pts[0], v_pts[3]],
+                ]
+                for f_pts in faces:
+                    m_obj.add_face(f_pts)
+            except Exception:
+                pass
+            return m_obj
+
         for i, p in enumerate(pts):
-            m = Mesh()
-            # No 3D polyhedron facets: points are rendered as smooth 2D circles in the conduit overlay (Rhino style)
-            m._chunk_dirty = False
-            m._attrs_dirty = False
+            m = _make_handle_marker()
+            m._chunk_dirty = True
+            m._attrs_dirty = True
 
             handle_name = f"CP {i + 1} ({self.title})"
             try:

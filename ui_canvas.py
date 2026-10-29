@@ -1219,7 +1219,7 @@ class NodeItem(QGraphicsItem):
 
         else:
 
-            self.WIDTH = 228.0
+            self.WIDTH = float(getattr(self.node, "card_width", 228.0))
 
             total_rows = max(1, len(node.outputs) + len(node.inputs)) + extra_rows
 
@@ -1656,6 +1656,8 @@ class NodeItem(QGraphicsItem):
         extra_rows = len(action_buttons) + (1 if badge_text is not None else 0)
 
 
+
+        self.WIDTH = float(getattr(self.node, "card_width", 228.0))
 
         total_rows = max(1, len(self.node.outputs) + len(self.node.inputs)) + extra_rows
 

@@ -6741,137 +6741,78 @@ class NodeInspectorPanel(QWidget):
 class RibbonIconButton(QToolButton):
 
     def __init__(
-
         self,
-
         node_cls: type[BaseNode],
-
         on_click: Callable[[str], None],
-
         is_dark: bool = True,
-
+        icon_size: int = 32,
         parent: Optional[QWidget] = None,
-
     ) -> None:
-
         super().__init__(parent)
-
         self.node_cls = node_cls
-
         self.type_id = node_cls.type_id
-
         self.on_click = on_click
-
         self.is_dark = is_dark
-
+        self.icon_dim = int(icon_size)
         self._drag_start_pos: Optional[QPoint] = None
 
-
-
-        self.setFixedSize(40, 40)
-
-        self.setIconSize(QSize(30, 30))
-
+        self.set_icon_dimension(self.icon_dim)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-
         self.setAutoRaise(True)
 
-
-
         self._raw_title = getattr(node_cls, "title", self.type_id)
-
         self._raw_desc = getattr(node_cls, "description", "") or "No description available."
-
         self._raw_cat = getattr(node_cls, "category", "")
-
         self.retranslate_ui()
 
-
-
         self.update_icon(is_dark)
-
         self.clicked.connect(lambda: self.on_click(self.type_id))
 
-
+    def set_icon_dimension(self, icon_size: int) -> None:
+        self.icon_dim = int(icon_size)
+        btn_dim = self.icon_dim + 8
+        self.setFixedSize(btn_dim, btn_dim)
+        self.setIconSize(QSize(self.icon_dim, self.icon_dim))
+        self.updateGeometry()
 
     def retranslate_ui(self) -> None:
-
         title = tr(self._raw_title)
-
         desc = tr(self._raw_desc)
-
         cat = tr(self._raw_cat)
-
         self.setToolTip(
-
             f"<div style='font-family: Segoe UI, sans-serif; font-size: 11px;'>"
-
             f"<b>{title}</b> <span style='color: #888;'>({cat})</span><br/>"
-
             f"<span style='color: #61afef; font-family: monospace;'>{self.type_id}</span><hr style='margin:3px 0;'/>"
-
             f"{desc}</div>"
-
         )
 
-
-
     def update_icon(self, is_dark: bool) -> None:
-
         self.is_dark = is_dark
-
         self.setIcon(get_node_icon(self.type_id, is_dark))
 
-
-
     def mousePressEvent(self, event: QMouseEvent) -> None:
-
         if event.button() == Qt.MouseButton.LeftButton:
-
             self._drag_start_pos = event.pos()
-
         super().mousePressEvent(event)
 
-
-
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
-
         if event.buttons() & Qt.MouseButton.LeftButton and self._drag_start_pos is not None:
-
             if (event.pos() - self._drag_start_pos).manhattanLength() >= QApplication.startDragDistance():
-
                 drag = QDrag(self)
-
                 mime = QMimeData()
-
                 mime.setData("application/x-ingetrazo-node", self.type_id.encode("utf-8"))
-
                 mime.setText(self.type_id)
-
                 drag.setMimeData(mime)
 
-
-
-                icon_pix = self.icon().pixmap(32, 32)
-
+                icon_pix = self.icon().pixmap(self.icon_dim, self.icon_dim)
                 drag.setPixmap(icon_pix)
-
-                drag.setHotSpot(QPoint(16, 16))
-
-
+                drag.setHotSpot(QPoint(self.icon_dim // 2, self.icon_dim // 2))
 
                 self.setDown(False)
-
                 self._drag_start_pos = None
-
                 drag.exec(Qt.DropAction.CopyAction)
-
                 return
-
         super().mouseMoveEvent(event)
-
-
-
 
 
 class FlowLayout(QLayout):
@@ -6969,18 +6910,20 @@ class FlowLayout(QLayout):
 class NodeRibbonBar(QWidget):
     """
     Top category ribbon tabs for quick one-click node placement.
-    Features responsive FlowLayout wrapping, dynamic auto-fitting height,
-    and CAD-style subcategory card containers.
+    Features responsive FlowLayout wrapping, dynamic auto-fitting row height,
+    configurable icon sizes (24, 32, 48), and CAD-style subcategory card containers.
     """
     def __init__(
         self,
         on_node_clicked: Callable[[str], None],
         is_dark: bool = True,
+        icon_size: int = 32,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
         self.on_node_clicked = on_node_clicked
         self.is_dark = is_dark
+        self.icon_size = int(icon_size)
         self.buttons: List[RibbonIconButton] = []
         self._build_ui()
 
@@ -7004,12 +6947,35 @@ class NodeRibbonBar(QWidget):
         self.apply_theme(self.is_dark)
         self._adjust_ribbon_height()
 
+    def set_icon_size(self, size: int) -> None:
+        """Updates icon size (e.g. 24, 32, 48) across all ribbon buttons and recalculates height."""
+        size = max(24, min(48, int(size)))
+        if self.icon_size == size and self.buttons:
+            return
+        self.icon_size = size
+        for btn in self.buttons:
+            btn.set_icon_dimension(size)
+
+        for idx in range(self.tab_widget.count()):
+            page = self.tab_widget.widget(idx)
+            container = getattr(page, "_container", None)
+            if container is not None:
+                for w in container.findChildren(QWidget):
+                    if w.layout() is not None:
+                        w.layout().invalidate()
+                    w.updateGeometry()
+                if container.layout() is not None:
+                    container.layout().invalidate()
+                container.updateGeometry()
+
+        self._adjust_ribbon_height()
+
     def populate_categories(self) -> None:
         self.tab_widget.clear()
         self.buttons.clear()
 
         cat_map: Dict[str, List[type[BaseNode]]] = {}
-        seen_classes: Set[type[BaseNode]] = set()
+        seen_classes = set()
         for node_cls in NODE_REGISTRY.values():
             if node_cls in seen_classes:
                 continue
@@ -7045,12 +7011,11 @@ class NodeRibbonBar(QWidget):
 
             container = QWidget()
             container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            container_layout = FlowLayout(container, margin=5, h_spacing=6, v_spacing=6)
+            container_layout = FlowLayout(container, margin=4, h_spacing=5, v_spacing=5)
 
             has_subcats = any(getattr(cls, "subcategory", None) for cls in node_classes)
 
             if has_subcats:
-                # Group nodes by subcategory
                 sub_groups: Dict[str, List[type[BaseNode]]] = {}
                 for cls in node_classes:
                     s_name = getattr(cls, "subcategory", None) or "General"
@@ -7075,7 +7040,13 @@ class NodeRibbonBar(QWidget):
                     btn_strip_layout.setSpacing(3)
 
                     for node_cls in s_nodes:
-                        btn = RibbonIconButton(node_cls, self.on_node_clicked, is_dark=self.is_dark, parent=btn_strip)
+                        btn = RibbonIconButton(
+                            node_cls,
+                            self.on_node_clicked,
+                            is_dark=self.is_dark,
+                            icon_size=self.icon_size,
+                            parent=btn_strip,
+                        )
                         self.buttons.append(btn)
                         btn_strip_layout.addWidget(btn)
 
@@ -7090,7 +7061,13 @@ class NodeRibbonBar(QWidget):
                     container_layout.addWidget(card)
             else:
                 for node_cls in node_classes:
-                    btn = RibbonIconButton(node_cls, self.on_node_clicked, is_dark=self.is_dark, parent=container)
+                    btn = RibbonIconButton(
+                        node_cls,
+                        self.on_node_clicked,
+                        is_dark=self.is_dark,
+                        icon_size=self.icon_size,
+                        parent=container,
+                    )
                     self.buttons.append(btn)
                     container_layout.addWidget(btn)
 
@@ -7105,36 +7082,72 @@ class NodeRibbonBar(QWidget):
 
         self.apply_theme(self.is_dark)
         self._adjust_ribbon_height()
-        QTimer.singleShot(30, self._adjust_ribbon_height)
+        QTimer.singleShot(0, self._adjust_ribbon_height)
 
     def _adjust_ribbon_height(self) -> None:
-        """Dynamically adjusts ribbon scroll area height to tightly fit the current tab's content."""
+        """Dynamically adjusts ribbon height to tightly fit the current tab's wrapped button rows."""
         page = self.tab_widget.currentWidget()
         if page is None:
             return
         scroll = getattr(page, "_scroll_area", None)
+        container = getattr(page, "_container", None)
         container_layout = getattr(page, "_container_layout", None)
         if scroll is None or container_layout is None:
             return
 
-        vp = scroll.viewport()
-        avail_w = vp.width() if vp and vp.width() > 10 else (self.width() - 10 if self.width() > 10 else 600)
+        # Always use the actual ribbon/parent width rather than a hidden tab viewport's stale 100px width
+        w = self.width()
+        if w <= 50 and self.parentWidget() is not None:
+            w = self.parentWidget().width()
+        avail_w = max(80, (w if w > 50 else 600) - 4)
+
+        container_layout.invalidate()
         needed_h = container_layout.heightForWidth(avail_w)
-        # Clamped so 1 row is ~48-52px, 2 rows ~96px, and cap at 165px to prevent pushing canvas down
-        clamped_h = max(46, min(165, needed_h + 2))
-        scroll.setFixedHeight(clamped_h)
+
+        max_h = 220
+        if needed_h > max_h:
+            needed_h = container_layout.heightForWidth(max(80, avail_w - 8))
+
+        min_h = self.icon_size + 16
+        clamped_h = max(min_h, min(max_h, needed_h))
+
+        if container is not None:
+            container.setMinimumHeight(needed_h)
+
+        # Collapse inactive pages so QTabWidget never reserves the tallest hidden tab's sizeHint
+        for idx in range(self.tab_widget.count()):
+            p = self.tab_widget.widget(idx)
+            s = getattr(p, "_scroll_area", None)
+            if p is page:
+                if s is not None:
+                    s.setFixedHeight(clamped_h)
+                p.setFixedHeight(clamped_h)
+            else:
+                if s is not None:
+                    s.setFixedHeight(0)
+                p.setFixedHeight(0)
+
+        tab_bar = self.tab_widget.tabBar()
+        tab_h = tab_bar.sizeHint().height() if tab_bar is not None else 26
+        if tab_bar is not None and tab_bar.height() > 10:
+            tab_h = tab_bar.height()
+
+        total_h = tab_h + clamped_h + 1
+        self.tab_widget.setFixedHeight(total_h)
+        self.setFixedHeight(total_h)
         self.updateGeometry()
+
+    def showEvent(self, event: Any) -> None:
+        super().showEvent(event)
+        self._adjust_ribbon_height()
+        QTimer.singleShot(0, self._adjust_ribbon_height)
 
     def resizeEvent(self, event: Any) -> None:
         super().resizeEvent(event)
         self._adjust_ribbon_height()
 
     def sizeHint(self) -> QSize:
-        page = self.tab_widget.currentWidget()
-        scroll = getattr(page, "_scroll_area", None) if page else None
-        scroll_h = scroll.height() if scroll else 52
-        tab_h = self.tab_widget.tabBar().sizeHint().height() if self.tab_widget.tabBar() else 26
-        return QSize(self.width(), tab_h + scroll_h)
+        return QSize(self.width(), self.height())
 
     def retranslate_ui(self) -> None:
         for idx in range(self.tab_widget.count()):
@@ -9416,61 +9429,70 @@ class NodeEditorWidget(QWidget):
         meta = get_current_language_meta()
 
         self.btn_lang = QPushButton(f"{meta.get('flag', '🌐')} {meta.get('code', 'en').upper()} ▾")
-
         self.btn_lang.setToolTip(tr("Change Language"))
-
+        if hasattr(self, "cmb_icon_size"):
+            self.cmb_icon_size.setToolTip(tr("Ribbon Icon Size (24px, 32px, 48px)"))
         self.btn_lang.setStyleSheet("""
-
             QPushButton {
-
                 background: #2c313a;
-
                 color: #e5c07b;
-
                 font-weight: 500;
-
                 border: 1px solid #3e4451;
-
                 border-radius: 4px;
-
                 padding: 3px 7px;
-
                 font-size: 11px;
-
             }
-
             QPushButton:hover {
-
                 background: #3e4451;
-
                 color: #ffffff;
-
                 border-color: #e5c07b;
-
             }
-
         """)
 
-
+        self.cmb_icon_size = QComboBox()
+        self.cmb_icon_size.setToolTip(tr("Ribbon Icon Size (24px, 32px, 48px)"))
+        for sz in (24, 32, 48):
+            self.cmb_icon_size.addItem(f"{sz}px", sz)
+        self.cmb_icon_size.setCurrentIndex(1)  # Default 32px
+        self.cmb_icon_size.setStyleSheet("""
+            QComboBox {
+                background: #2c313a;
+                color: #abb2bf;
+                border: 1px solid #3e4451;
+                border-radius: 4px;
+                padding: 2px 6px;
+                font-size: 11px;
+                min-width: 48px;
+            }
+            QComboBox:hover {
+                background: #3e4451;
+                color: #ffffff;
+                border-color: #61afef;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 14px;
+            }
+            QComboBox QAbstractItemView {
+                background: #21252b;
+                color: #abb2bf;
+                border: 1px solid #3e4451;
+                selection-background-color: #2c313a;
+                selection-color: #ffffff;
+                outline: 0;
+            }
+        """)
 
         self.lbl_status = QLabel(tr("Ready"))
-
         self.lbl_status.setStyleSheet("color: #98c379; font-size: 11px;")
 
-
-
         bar_layout.addWidget(self.btn_ribbon_toggle)
-
         for b in (self.btn_add, self.btn_custom, self.btn_bake, self.btn_load_group):
-
             bar_layout.addWidget(b)
-
         bar_layout.addWidget(self.chk_live)
-
         bar_layout.addWidget(self.btn_lang)
-
+        bar_layout.addWidget(self.cmb_icon_size)
         bar_layout.addStretch(1)
-
         bar_layout.addWidget(self.lbl_status)
 
 
@@ -9674,6 +9696,9 @@ class NodeEditorWidget(QWidget):
         self.btn_gumball.toggled.connect(self._toggle_gumball)
 
         self.btn_lang.clicked.connect(self._open_language_menu)
+        self.cmb_icon_size.currentIndexChanged.connect(
+            lambda _idx: self.ribbon.set_icon_size(int(self.cmb_icon_size.currentData() or 32))
+        )
 
         register_language_listener(lambda code: self.retranslate_ui())
 

@@ -91,6 +91,7 @@ class BaseNode:
 
     # Set to True if this node pushes geometry to IngeTrazo's viewport
     is_output_node: bool = False
+    auto_broadcast: bool = True
 
     # Visual Icon & Badge Configuration
     icon: Optional[str] = None         # Filename in addon's icons/ folder or absolute path
@@ -188,9 +189,23 @@ class BaseNode:
         max_len = 1
         has_broadcast = False
 
+        if not getattr(self, "auto_broadcast", True):
+            for spec in self.inputs:
+                v = raw_inputs.get(spec.id, self.param_values.get(spec.id, spec.default))
+                coerced[spec.id] = coerce_value(v, spec.type)
+            return self.compute(**coerced)
+
         for spec in self.inputs:
             val = raw_inputs.get(spec.id, self.param_values.get(spec.id, spec.default))
             val = coerce_value(val, spec.type)
+
+            # Preserve 3-4 element numeric lists (such as JSON-deserialized colors or points) as single values
+            if isinstance(val, list):
+                if spec.id.lower() in ("color", "rgb", "rgba") and len(val) in (3, 4) and all(isinstance(x, (int, float)) for x in val):
+                    val = tuple(val)
+                elif spec.type in (SocketType.VEC3, SocketType.POINT, SocketType.VECTOR) and len(val) == 3 and all(isinstance(x, (int, float)) for x in val):
+                    val = Vec3(*val)
+
             coerced[spec.id] = val
 
             if spec.access == AccessMode.ITEM and isinstance(val, list):
@@ -218,8 +233,11 @@ class BaseNode:
                     slice_kwargs[spec.id] = coerced[spec.id]
 
             res = self.compute(**slice_kwargs)
-            for out in self.outputs:
-                batched_results[out.id].append(res.get(out.id))
+            if isinstance(res, dict):
+                for k, v in res.items():
+                    if k not in batched_results:
+                        batched_results[k] = []
+                    batched_results[k].append(v)
 
         return batched_results
 

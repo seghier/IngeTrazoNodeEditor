@@ -76,6 +76,7 @@ PLUGIN = {
     "description": "Visual parametric node editor with Blender-style sliders, live viewport sync, and BIM tagging.",
 }
 
+_ACTIVE_APP: Optional[Any] = None
 PREVIEW_TAG = "_ingetrazo_node_preview"
 
 
@@ -112,6 +113,17 @@ def _install_igz_save_filter() -> None:
         orig_save_scene = igz_mod.save_scene
 
         def _safe_save_scene(scene: Any, path: Any, *args: Any, **kwargs: Any) -> Any:
+            try:
+                if hasattr(scene, "plugin_data"):
+                    if scene.plugin_data is None:
+                        scene.plugin_data = {}
+                    app = getattr(sys.modules.get(__name__), "_ACTIVE_APP", None)
+                    win = getattr(app, "_window", None) or getattr(app, "window", None) if app else None
+                    ed = getattr(win, "_node_editor_widget", None) if win else None
+                    if ed and hasattr(ed, "engine") and getattr(ed.engine, "nodes", None):
+                        scene.plugin_data["node_editor"] = ed.engine.to_dict()
+            except Exception:
+                pass
             groups = getattr(scene, "groups", None)
             if groups:
                 preview_groups = [g for g in groups if is_preview_group(g)]
@@ -1070,6 +1082,8 @@ class NodeEditorTool(Tool):
 
 def setup(app: Any) -> None:
     """Extension initialization called by IngeTrazo's core.extensions loader."""
+    global _ACTIVE_APP
+    _ACTIVE_APP = app
     try:
         discover_nodes(reload_modules=False)
         _install_igz_save_filter()
@@ -1131,9 +1145,59 @@ def setup(app: Any) -> None:
             win._node_editor_dock = dock
             win._node_editor_bridge = bridge
 
+            def _restore_graph_from_doc() -> None:
+                saved = None
+                if hasattr(app, "document_data"):
+                    try:
+                        saved = app.document_data(default=None)
+                    except Exception:
+                        saved = None
+                if not saved:
+                    try:
+                        sc = getattr(app, "scene", None) or getattr(getattr(app, "viewport", None), "scene", None)
+                        pdata = getattr(sc, "plugin_data", {}) or {}
+                        saved = pdata.get("node_editor", None)
+                    except Exception:
+                        saved = None
+                if saved and isinstance(saved, dict) and "nodes" in saved and saved["nodes"]:
+                    try:
+                        engine.load_dict(saved)
+                        editor_widget.scene.rebuild_from_engine()
+                        if bridge.live_sync:
+                            editor_widget.schedule_eval()
+                    except Exception as ex:
+                        import logging
+                        logging.getLogger("ingetrazo.plugins").warning(f"Could not restore node graph: {ex}")
+
+            if hasattr(app, "on_document_changed"):
+                try:
+                    app.on_document_changed(_restore_graph_from_doc)
+                except Exception:
+                    pass
+
+            if hasattr(win, "open_path") and not getattr(win, "_node_editor_open_hooked", False):
+                orig_win_open_path = win.open_path
+                def _safe_win_open_path(path: Any, *args: Any, **kwargs: Any) -> Any:
+                    res = orig_win_open_path(path, *args, **kwargs)
+                    _restore_graph_from_doc()
+                    return res
+                win.open_path = _safe_win_open_path
+                win._node_editor_open_hooked = True
+
             if hasattr(win, "_do_save") and not getattr(win, "_node_editor_save_hooked", False):
                 orig_win_do_save = win._do_save
                 def _safe_win_do_save(save_path: Any) -> Any:
+                    try:
+                        graph_data = engine.to_dict()
+                        if hasattr(app, "set_document_data"):
+                            app.set_document_data(graph_data)
+                        sc = getattr(app, "scene", None) or getattr(getattr(app, "viewport", None), "scene", None)
+                        if sc is not None:
+                            if not hasattr(sc, "plugin_data") or sc.plugin_data is None:
+                                sc.plugin_data = {}
+                            sc.plugin_data["node_editor"] = graph_data
+                    except Exception:
+                        pass
                     bridge.clear_preview(refresh=False)
                     try:
                         return orig_win_do_save(save_path)

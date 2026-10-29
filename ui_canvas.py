@@ -1207,6 +1207,16 @@ class NodeItem(QGraphicsItem):
 
             self.height = 195.0
 
+        elif getattr(self.node, "is_embedded_viewer", False):
+
+            self.WIDTH = getattr(self.node, "card_width", 340.0)
+
+            viewer_h = getattr(self.node, "card_viewer_height", 240.0)
+
+            total_rows = max(1, len(node.outputs) + len(node.inputs)) + extra_rows
+
+            self.height = self.HEADER_H + total_rows * self.ROW_H + viewer_h + 18.0
+
         else:
 
             self.WIDTH = 228.0
@@ -1262,6 +1272,12 @@ class NodeItem(QGraphicsItem):
 
 
     def update_panel_display(self) -> None:
+
+        if hasattr(self, "_embedded_widget") and hasattr(self.node, "update_embedded_widget"):
+            try:
+                self.node.update_embedded_widget(self._embedded_widget)
+            except Exception as e:
+                log.warning("Error updating embedded widget on %s: %s", self.node.type_id, e)
 
         if self.node.type_id != "input.panel" or not hasattr(self, "_panel_editor"):
 
@@ -1606,6 +1622,20 @@ class NodeItem(QGraphicsItem):
                 self.proxies["_btn_bake"] = proxy
 
             row_idx += 1
+
+        if hasattr(self.node, "create_embedded_widget"):
+            try:
+                emb_widget = self.node.create_embedded_widget(self)
+                if emb_widget is not None:
+                    y_emb = self.HEADER_H + 15.0 + row_idx * self.ROW_H
+                    proxy_emb = QGraphicsProxyWidget(self)
+                    proxy_emb.setWidget(emb_widget)
+                    proxy_emb.setPos(10.0, y_emb)
+                    proxy_emb.setZValue(15.0)
+                    self.proxies["_embedded_viewer"] = proxy_emb
+                    self._embedded_widget = emb_widget
+            except Exception as e:
+                log.warning("Could not instantiate embedded widget for node %s: %s", self.node.type_id, e)
 
 
 
@@ -3913,6 +3943,12 @@ class NodeCanvasView(QGraphicsView):
 
 
     def wheelEvent(self, event: QWheelEvent) -> None:
+
+        pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        item = self.itemAt(pos)
+        if isinstance(item, QGraphicsProxyWidget):
+            super().wheelEvent(event)
+            return
 
         self._grow_scene_rect()
 

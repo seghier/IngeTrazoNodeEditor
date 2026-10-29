@@ -146,18 +146,22 @@ def _soften_and_apply_cad_edges(target_mesh: Any, mesh_data: MeshData) -> None:
     # 1. Soften internal facet edges if mesh_data is smooth (standard for B-Rep / CAD solids)
     if getattr(mesh_data, "smooth", False):
         try:
-            fn_map = {id(f): f.normal().normalized() for f in target_mesh.faces}
-            for e in target_mesh.edges:
-                fs = getattr(e, "faces", ())
-                if len(fs) == 2:
-                    n0 = fn_map.get(id(fs[0]))
-                    n1 = fn_map.get(id(fs[1]))
-                    if n0 is not None and n1 is not None:
-                        # Angle < 31.8 degrees (cos > 0.85) or coplanar: soften internal facet edge!
-                        if QVector3D.dotProduct(n0, n1) > 0.85:
-                            e.soft = True
-                elif len(fs) > 2:
+            if mesh_data.edges:
+                # When explicit CAD boundary curves are provided, soften all face triangulation edges
+                for e in target_mesh.edges:
                     e.soft = True
+            else:
+                # Dihedral normal threshold (< 32 deg) for facet softening
+                fn_map = {id(f): f.normal().normalized() for f in target_mesh.faces}
+                for e in target_mesh.edges:
+                    fs = getattr(e, "faces", ())
+                    if len(fs) == 2:
+                        n0 = fn_map.get(id(fs[0]))
+                        n1 = fn_map.get(id(fs[1]))
+                        if n0 is not None and n1 is not None and QVector3D.dotProduct(n0, n1) > 0.85:
+                            e.soft = True
+                    elif len(fs) > 2:
+                        e.soft = True
         except Exception:
             pass
 
@@ -171,18 +175,9 @@ def _soften_and_apply_cad_edges(target_mesh: Any, mesh_data: MeshData) -> None:
         for i0, i1 in mesh_data.edges:
             if 0 <= i0 < len(qvecs) and 0 <= i1 < len(qvecs):
                 try:
-                    v0 = target_mesh.vertex(qvecs[i0])
-                    v1 = target_mesh.vertex(qvecs[i1])
-                    ed = target_mesh.find_edge(v0, v1)
+                    ed = target_mesh.add_edge(qvecs[i0], qvecs[i1])
                     if ed is not None:
                         ed.soft = False
-                    else:
-                        from core.mesh import Edge
-                        new_e = Edge(v0, v1)
-                        v0.edges.add(new_e)
-                        v1.edges.add(new_e)
-                        target_mesh.edges.append(new_e)
-                        new_e.soft = False
                 except Exception:
                     pass
 

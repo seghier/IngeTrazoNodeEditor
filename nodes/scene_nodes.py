@@ -1099,6 +1099,23 @@ class PreviewNode(BaseNode):
 
         op_float = float(opacity)
 
+        if hasattr(geometry, "faces") or type(geometry).__name__ == "Brep":
+            try:
+                from brep_engine import BRepEngine
+                if BRepEngine.is_available():
+                    geometry = BRepEngine.brep_to_mesh_data(geometry, name="BRep_Preview")
+            except Exception:
+                pass
+        elif hasattr(geometry, "parameter_range") or type(geometry).__name__ == "Curve":
+            try:
+                from brep_engine import BRepEngine
+                if BRepEngine.is_available():
+                    cd = BRepEngine.curve_to_curve_data(geometry)
+                    if cd and cd.points:
+                        geometry = cd.to_wire_mesh(name="BRep_Preview_Curve")
+            except Exception:
+                pass
+
         if isinstance(geometry, MeshData):
             m = geometry.copy()
             if col_tuple is not None:

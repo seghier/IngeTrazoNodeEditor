@@ -1237,6 +1237,26 @@ class IngeTrazoOutputNode(BaseNode):
                     flat.append(x.to_mesh_face(name="Profile_Solid"))
                 elif x.points:
                     flat.append(x.to_wire_mesh(name="Curve_Wire"))
+            elif hasattr(x, "faces") or type(x).__name__ == "Brep":
+                try:
+                    from brep_engine import BRepEngine
+                    if BRepEngine.is_available():
+                        bm = BRepEngine.brep_to_mesh_data(x, name="BRep_Solid")
+                        if bm and (bm.vertices or bm.edges):
+                            flat.append(bm)
+                except Exception:
+                    pass
+            elif hasattr(x, "parameter_range") or type(x).__name__ == "Curve":
+                try:
+                    from brep_engine import BRepEngine
+                    if BRepEngine.is_available():
+                        cd = BRepEngine.curve_to_curve_data(x)
+                        if cd and len(cd.points) >= 3 and cd.closed:
+                            flat.append(cd.to_mesh_face(name="BRep_Profile_Solid"))
+                        elif cd and cd.points:
+                            flat.append(cd.to_wire_mesh(name="BRep_Curve_Wire"))
+                except Exception:
+                    pass
             elif isinstance(x, (list, tuple)):
                 for sub in x:
                     _collect(sub)

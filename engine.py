@@ -290,6 +290,30 @@ class GraphEngine:
                     if source_node_id:
                         m.source_node_id = source_node_id
                     meshes.append(m)
+            elif hasattr(val, "parameter_range") or type(val).__name__ == "Curve":
+                try:
+                    from brep_engine import BRepEngine
+                    if BRepEngine.is_available():
+                        cd = BRepEngine.curve_to_curve_data(val)
+                        if cd and cd.points:
+                            m = cd.to_wire_mesh(name=f"{default_name}_Curve")
+                            if source_node_id:
+                                m.source_node_id = source_node_id
+                            meshes.append(m)
+                except Exception:
+                    pass
+            elif hasattr(val, "faces") or type(val).__name__ == "Brep":
+                try:
+                    from brep_engine import BRepEngine
+                    if BRepEngine.is_available():
+                        bm = BRepEngine.brep_to_mesh_data(val, name=default_name)
+                        if bm and (bm.vertices or bm.edges):
+                            m = bm.copy()
+                            if source_node_id:
+                                m.source_node_id = source_node_id
+                            meshes.append(m)
+                except Exception:
+                    pass
             elif isinstance(val, Vec3):
                 points.append(val)
             elif isinstance(val, dict):

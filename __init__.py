@@ -555,14 +555,14 @@ class IngeTrazoSceneBridge:
         try:
             sc = self.scene
             if sc is not None:
+                if hasattr(sc, "version"):
+                    sc.version += 1
                 bump = getattr(sc, "bump_view", None)
                 if callable(bump):
                     try:
                         bump()
                     except Exception:
                         pass
-                elif hasattr(sc, "version"):
-                    sc.version += 1
                 if hasattr(sc, "version"):
                     self._last_handled_version = sc.version
                 for fn_name in ("invalidate", "mark_dirty"):
@@ -575,6 +575,18 @@ class IngeTrazoSceneBridge:
 
             vp = self.viewport
             if vp is not None:
+                if hasattr(vp, "_epoch_same"):
+                    vp._epoch_same = None
+                if hasattr(vp, "_placements_memo"):
+                    vp._placements_memo = None
+                if hasattr(vp, "_inst_pool"):
+                    vp._inst_pool = None
+                notify = getattr(vp, "notify_scene_changed", None)
+                if callable(notify):
+                    try:
+                        notify()
+                    except Exception:
+                        pass
                 for fn_name in ("invalidate_buffers", "mark_dirty", "update"):
                     fn = getattr(vp, fn_name, None)
                     if callable(fn):
@@ -584,8 +596,8 @@ class IngeTrazoSceneBridge:
                             pass
                 try:
                     from PySide6.QtCore import QTimer
-                    QTimer.singleShot(0, lambda: vp.update() if vp is not None else None)
-                    QTimer.singleShot(60, lambda: vp.update() if vp is not None else None)
+                    QTimer.singleShot(0, lambda: vp.update() if (vp is not None and hasattr(vp, 'update')) else None)
+                    QTimer.singleShot(30, lambda: vp.update() if (vp is not None and hasattr(vp, 'update')) else None)
                 except Exception:
                     pass
         finally:

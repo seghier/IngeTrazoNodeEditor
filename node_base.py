@@ -85,6 +85,7 @@ class BaseNode:
     type_id: str = "core.base"
     title: str = "Base Node"
     category: str = "General"
+    subcategory: str = ""
     description: str = ""
     header_color: tuple[int, int, int] = (52, 73, 94)
 

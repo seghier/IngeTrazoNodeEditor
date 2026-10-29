@@ -3034,25 +3034,16 @@ class NodeSearchPopup(QDialog):
 
 
     def _get_all_leaf_items(self) -> List[QTreeWidgetItem]:
-
         items: List[QTreeWidgetItem] = []
-
-        root = self.tree_widget.invisibleRootItem()
-
-        for i in range(root.childCount()):
-
-            cat = root.child(i)
-
-            if not cat.isExpanded():
-
-                continue
-
-            for j in range(cat.childCount()):
-
-                items.append(cat.child(j))
-
+        def _collect(parent_item):
+            for i in range(parent_item.childCount()):
+                child = parent_item.child(i)
+                if child.childCount() == 0:
+                    items.append(child)
+                elif child.isExpanded():
+                    _collect(child)
+        _collect(self.tree_widget.invisibleRootItem())
         return items
-
 
 
     def _navigate_tree(self, key: int) -> None:
@@ -3180,31 +3171,47 @@ class NodeSearchPopup(QDialog):
 
 
             # Node items under category
+            has_subcats = any(getattr(cls, "subcategory", "").strip() for _, cls, _ in matching_nodes)
+            if has_subcats:
+                subcat_groups: Dict[str, List[Tuple[str, type, str]]] = {}
+                for type_id, cls, tr_title in matching_nodes:
+                    sc = getattr(cls, "subcategory", "").strip() or tr("General")
+                    subcat_groups.setdefault(sc, []).append((type_id, cls, tr_title))
 
-            for type_id, cls, tr_title in matching_nodes:
+                for sc, sc_nodes in sorted(subcat_groups.items(), key=lambda kv: kv[0]):
+                    subcat_item = QTreeWidgetItem(cat_item)
+                    subcat_item.setText(0, f"📁 {tr(sc)}")
+                    sub_f = subcat_item.font(0)
+                    sub_f.setBold(True)
+                    subcat_item.setFont(0, sub_f)
+                    subcat_item.setForeground(0, QBrush(QColor(152, 195, 121)))
+                    subcat_item.setSizeHint(0, QSize(0, 22))
+                    subcat_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
 
-                node_item = QTreeWidgetItem(cat_item)
-
-                node_item.setText(0, tr_title)
-
-                node_item.setIcon(0, get_node_icon(type_id, is_dark=True))
-
-                node_item.setData(0, Qt.ItemDataRole.UserRole, type_id)
-
-                if cls.description:
-
-                    node_item.setToolTip(0, tr(cls.description))
-
-                node_item.setSizeHint(0, QSize(0, 24))
-
-                node_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-
-
-
-                if first_node_item is None:
-
-                    first_node_item = node_item
-
+                    for type_id, cls, tr_title in sc_nodes:
+                        node_item = QTreeWidgetItem(subcat_item)
+                        node_item.setText(0, tr_title)
+                        node_item.setIcon(0, get_node_icon(type_id, is_dark=True))
+                        node_item.setData(0, Qt.ItemDataRole.UserRole, type_id)
+                        if cls.description:
+                            node_item.setToolTip(0, tr(cls.description))
+                        node_item.setSizeHint(0, QSize(0, 24))
+                        node_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                        if first_node_item is None:
+                            first_node_item = node_item
+                    subcat_item.setExpanded(True)
+            else:
+                for type_id, cls, tr_title in matching_nodes:
+                    node_item = QTreeWidgetItem(cat_item)
+                    node_item.setText(0, tr_title)
+                    node_item.setIcon(0, get_node_icon(type_id, is_dark=True))
+                    node_item.setData(0, Qt.ItemDataRole.UserRole, type_id)
+                    if cls.description:
+                        node_item.setToolTip(0, tr(cls.description))
+                    node_item.setSizeHint(0, QSize(0, 24))
+                    node_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                    if first_node_item is None:
+                        first_node_item = node_item
 
 
         self.tree_widget.expandAll()

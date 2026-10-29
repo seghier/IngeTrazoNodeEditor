@@ -217,6 +217,8 @@ class MeshData:
     holes: Optional[List[List[Any]]] = None
     holed_faces: List[Tuple[List[int], List[List[int]]]] = field(default_factory=list)
     source_node_id: Optional[str] = None
+    smooth: bool = True
+    show_wires: bool = True
 
     def copy(self) -> MeshData:
         return MeshData(
@@ -235,6 +237,8 @@ class MeshData:
             holes=[list(h) for h in self.holes] if self.holes else None,
             holed_faces=[(list(o), [list(h) for h in hl]) for (o, hl) in self.holed_faces],
             source_node_id=self.source_node_id,
+            smooth=self.smooth,
+            show_wires=self.show_wires,
         )
 
     def transformed(

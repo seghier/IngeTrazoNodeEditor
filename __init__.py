@@ -131,6 +131,62 @@ def _install_igz_save_filter() -> None:
         logging.getLogger("ingetrazo.plugins").warning(f"Could not install igz save filter: {ex}")
 
 
+def _soften_and_apply_cad_edges(target_mesh: Any, mesh_data: MeshData) -> None:
+    """
+    Rhino-parity edge filter for 3D Viewport rendering:
+    Softens internal triangulation facets between faces with small dihedral angle (< 32 deg) or coplanar facets,
+    hiding triangle diagonal wires so curved surfaces (spheres, cylinders, fillets) read smooth like CAD B-Reps.
+    Preserves true CAD boundary wires and crease edges as crisp hard lines.
+    """
+    if not hasattr(target_mesh, "edges") or not target_mesh.edges:
+        return
+
+    from PySide6.QtGui import QVector3D
+
+    # 1. Soften internal facet edges if mesh_data is smooth (standard for B-Rep / CAD solids)
+    if getattr(mesh_data, "smooth", False):
+        try:
+            fn_map = {id(f): f.normal().normalized() for f in target_mesh.faces}
+            for e in target_mesh.edges:
+                fs = getattr(e, "faces", ())
+                if len(fs) == 2:
+                    n0 = fn_map.get(id(fs[0]))
+                    n1 = fn_map.get(id(fs[1]))
+                    if n0 is not None and n1 is not None:
+                        # Angle < 31.8 degrees (cos > 0.85) or coplanar: soften internal facet edge!
+                        if QVector3D.dotProduct(n0, n1) > 0.85:
+                            e.soft = True
+                elif len(fs) > 2:
+                    e.soft = True
+        except Exception:
+            pass
+
+    # 2. If show_wires is explicitly False, soften/hide ALL edges for seamless shaded view
+    if not getattr(mesh_data, "show_wires", True):
+        for e in target_mesh.edges:
+            e.soft = True
+    elif getattr(mesh_data, "edges", None):
+        # 3. Ensure explicit CAD boundary wires remain crisp hard edges
+        qvecs = [QVector3D(float(x), float(y), float(z)) for x, y, z in mesh_data.vertices]
+        for i0, i1 in mesh_data.edges:
+            if 0 <= i0 < len(qvecs) and 0 <= i1 < len(qvecs):
+                try:
+                    v0 = target_mesh.vertex(qvecs[i0])
+                    v1 = target_mesh.vertex(qvecs[i1])
+                    ed = target_mesh.find_edge(v0, v1)
+                    if ed is not None:
+                        ed.soft = False
+                    else:
+                        from core.mesh import Edge
+                        new_e = Edge(v0, v1)
+                        v0.edges.add(new_e)
+                        v1.edges.add(new_e)
+                        target_mesh.edges.append(new_e)
+                        new_e.soft = False
+                except Exception:
+                    pass
+
+
 def _populate_ingetrazo_mesh(target_mesh: Any, mesh_data: MeshData, scene: Optional[Any] = None) -> None:
     """
     Writes a watertight `MeshData` into an IngeTrazo `core.mesh.Mesh` instance.
@@ -300,6 +356,7 @@ def _populate_ingetrazo_mesh(target_mesh: Any, mesh_data: MeshData, scene: Optio
                 r_sizes = np.array(ring_sizes, dtype=np.int64)
                 f_counts = np.ones(valid_face_count, dtype=np.int64)
                 target_mesh.add_faces_bulk(pos, r_sizes, f_counts, attrs=attrs_list)
+                _soften_and_apply_cad_edges(target_mesh, mesh_data)
                 return
         except Exception:
             pass  # Fall back to standard individual face loop
@@ -365,6 +422,8 @@ def _populate_ingetrazo_mesh(target_mesh: Any, mesh_data: MeshData, scene: Optio
                 target_mesh.add_edge(qvecs[i0], qvecs[i1])
             except Exception:
                 pass
+
+    _soften_and_apply_cad_edges(target_mesh, mesh_data)
 
 
 def _make_ingetrazo_group(mesh_data: MeshData, graph_dict: dict, is_preview: bool = False, scene: Optional[Any] = None) -> Any:

@@ -498,11 +498,14 @@ class IngeTrazoSceneBridge:
             except Exception as ex:
                 import logging
                 logging.getLogger("ingetrazo.plugins").warning(f"Could not register viewport overlay: {ex}")
+        self.update_all_viewports()
 
     def _draw_overlay(self, viewport: Any, painter: Any) -> None:
         """
         Draws live preview geometry (points, curves, wireframes, and shaded solids)
         directly onto the IngeTrazo viewport canvas without touching scene.groups.
+        Uses global scene-wide Painter's algorithm with camera-plane depth sorting
+        so objects and wireframes preserve exact 3D occlusion across all camera orbits.
         """
         if not self.live_sync or not self.is_editor_active():
             return
@@ -510,8 +513,9 @@ class IngeTrazoSceneBridge:
             return
 
         try:
+            import numpy as np
             from PySide6.QtCore import QLineF, QPointF, Qt
-            from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF
+            from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPolygonF
 
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
@@ -529,31 +533,82 @@ class IngeTrazoSceneBridge:
             if not pts_list:
                 return
 
-            if hasattr(self.app, "world_to_pixels"):
-                px, py, ok = self.app.world_to_pixels(pts_list)
-            elif hasattr(viewport, "world_to_pixels"):
+            if hasattr(viewport, "world_to_pixels"):
                 px, py, ok = viewport.world_to_pixels(pts_list)
+            elif hasattr(self.app, "world_to_pixels"):
+                px, py, ok = self.app.world_to_pixels(pts_list)
             else:
                 return
 
-            # Camera position for depth-sorting
+            # Camera position and view direction for planar depth-sorting
             cam = getattr(viewport, "camera", None)
             cam_eye = None
             if cam is not None and hasattr(cam, "eye"):
                 try:
-                    eye_pt = cam.eye()
-                    cam_eye = (eye_pt.x(), eye_pt.y(), eye_pt.z())
+                    eye_val = cam.eye() if callable(cam.eye) else cam.eye
+                    if hasattr(eye_val, "x"):
+                        cam_eye = (float(eye_val.x()), float(eye_val.y()), float(eye_val.z()))
+                    elif isinstance(eye_val, (tuple, list)) and len(eye_val) >= 3:
+                        cam_eye = (float(eye_val[0]), float(eye_val[1]), float(eye_val[2]))
                 except Exception:
                     pass
-            if cam_eye is None and cam is not None and hasattr(cam, "target"):
-                cam_eye = (cam.target.x(), cam.target.y(), cam.target.z())
+
+            cam_fwd = None
+            if cam is not None and hasattr(cam, "forward"):
+                try:
+                    fwd_val = cam.forward() if callable(cam.forward) else cam.forward
+                    if hasattr(fwd_val, "x"):
+                        cam_fwd = (float(fwd_val.x()), float(fwd_val.y()), float(fwd_val.z()))
+                    elif isinstance(fwd_val, (tuple, list)) and len(fwd_val) >= 3:
+                        cam_fwd = (float(fwd_val[0]), float(fwd_val[1]), float(fwd_val[2]))
+                except Exception:
+                    pass
+
+            if cam is not None and hasattr(cam, "target"):
+                try:
+                    tgt_val = cam.target() if callable(cam.target) else cam.target
+                    if hasattr(tgt_val, "x"):
+                        tgt_pt = (float(tgt_val.x()), float(tgt_val.y()), float(tgt_val.z()))
+                    elif isinstance(tgt_val, (tuple, list)) and len(tgt_val) >= 3:
+                        tgt_pt = (float(tgt_val[0]), float(tgt_val[1]), float(tgt_val[2]))
+                    else:
+                        tgt_pt = None
+                    if tgt_pt is not None:
+                        if cam_eye is None:
+                            cam_eye = tgt_pt
+                        if cam_fwd is None and cam_eye is not None:
+                            dx = tgt_pt[0] - cam_eye[0]
+                            dy = tgt_pt[1] - cam_eye[1]
+                            dz = tgt_pt[2] - cam_eye[2]
+                            L = (dx * dx + dy * dy + dz * dz) ** 0.5
+                            if L > 1e-8:
+                                cam_fwd = (dx / L, dy / L, dz / L)
+                except Exception:
+                    pass
+
             if cam_eye is None:
-                cam_eye = (0.0, 0.0, 0.0)
+                cam_eye = (0.0, -10.0, 10.0)
+            if cam_fwd is None:
+                cam_fwd = (0.0, 0.7071, -0.7071)
+
+            # Precalculate vertex camera-plane depths vectorized
+            pts_arr = np.asarray(pts_list, dtype=np.float32)
+            v_depths = (
+                (pts_arr[:, 0] - cam_eye[0]) * cam_fwd[0]
+                + (pts_arr[:, 1] - cam_eye[1]) * cam_fwd[1]
+                + (pts_arr[:, 2] - cam_eye[2]) * cam_fwd[2]
+            )
 
             # Sun/light vector for diffuse face shading
             lx, ly, lz = 0.38, -0.57, 0.72
 
-            # 2. Draw Meshes
+            # Unified drawable elements list for global back-to-front Painter's sorting:
+            # kind 0: Face  -> (depth, 0, poly, face_col)
+            # kind 1: Edge  -> (depth, 1, line, pen)
+            # kind 2: Point -> (depth, 2, pt, pen, brush, dot_r)
+            draw_elements = []
+
+            # 2. Collect all faces and edges across ALL meshes into a unified scene list
             for m_idx, m in enumerate(self._preview_meshes):
                 offset = mesh_offsets[m_idx]
                 is_selected = m.source_node_id in self._selected_node_ids if m.source_node_id else False
@@ -574,15 +629,27 @@ class IngeTrazoSceneBridge:
                     )
                     wire_w = 1.2
 
-                # A. Faces (draw if present)
+                wire_pen = QPen(wire_color, wire_w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+
+                # A. Faces
                 if m.faces:
-                    drawable_faces = []
-                    for f in m.faces:
+                    for f_idx, f in enumerate(m.faces):
                         if len(f) < 3:
                             continue
                         global_indices = [offset + vi for vi in f]
                         if not all(ok[gi] for gi in global_indices):
                             continue
+
+                        # Face depth along camera sightline
+                        f_depth = sum(float(v_depths[gi]) for gi in global_indices) / len(global_indices)
+
+                        # Per-face color/opacity override support
+                        fr, fg, fb, fa = base_r, base_g, base_b, alpha
+                        if f_idx < len(m.face_colors) and m.face_colors[f_idx] is not None:
+                            fc = m.face_colors[f_idx]
+                            fr, fg, fb = float(fc[0]), float(fc[1]), float(fc[2])
+                        if f_idx < len(m.face_opacities) and m.face_opacities[f_idx] is not None:
+                            fa = float(m.face_opacities[f_idx])
 
                         # Calculate face normal from first 3 vertices
                         v0 = pts_list[global_indices[0]]
@@ -596,57 +663,99 @@ class IngeTrazoSceneBridge:
                         nlen = (nx * nx + ny * ny + nz * nz) ** 0.5
                         if nlen > 1e-8:
                             dot = (nx * lx + ny * ly + nz * lz) / nlen
-                            shade = 0.42 + 0.58 * max(0.0, dot)
+                            # Two-sided diffuse lighting
+                            shade = 0.42 + 0.58 * abs(dot)
                         else:
                             shade = 0.72
 
                         face_col = QColor.fromRgbF(
-                            min(1.0, base_r * shade),
-                            min(1.0, base_g * shade),
-                            min(1.0, base_b * shade),
-                            alpha,
+                            min(1.0, max(0.0, fr * shade)),
+                            min(1.0, max(0.0, fg * shade)),
+                            min(1.0, max(0.0, fb * shade)),
+                            min(1.0, max(0.0, fa)),
                         )
                         poly = QPolygonF([QPointF(float(px[gi]), float(py[gi])) for gi in global_indices])
-
-                        # Distance from camera eye for back-to-front depth sorting
-                        fc_x = sum(pts_list[gi][0] for gi in global_indices) / len(global_indices)
-                        fc_y = sum(pts_list[gi][1] for gi in global_indices) / len(global_indices)
-                        fc_z = sum(pts_list[gi][2] for gi in global_indices) / len(global_indices)
-                        dist_sq = (fc_x - cam_eye[0]) ** 2 + (fc_y - cam_eye[1]) ** 2 + (fc_z - cam_eye[2]) ** 2
-                        drawable_faces.append((dist_sq, poly, face_col))
-
-                    # Sort back-to-front (painter's algorithm)
-                    drawable_faces.sort(key=lambda item: item[0], reverse=True)
-                    painter.setPen(Qt.PenStyle.NoPen)
-                    for _, poly, col in drawable_faces:
-                        painter.setBrush(col)
-                        painter.drawPolygon(poly)
+                        draw_elements.append((f_depth, 0, poly, face_col))
 
                 # B. Edges / Wireframes
                 if getattr(m, "show_wires", True) and m.edges:
-                    painter.setPen(QPen(wire_color, wire_w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-                    lines = []
                     for i, j in m.edges:
                         gi, gj = offset + i, offset + j
                         if ok[gi] and ok[gj]:
-                            lines.append(QLineF(float(px[gi]), float(py[gi]), float(px[gj]), float(py[gj])))
-                    if lines:
-                        painter.drawLines(lines)
+                            # Edge depth with slight camera bias so wires draw on top of their own face
+                            e_depth = 0.5 * (float(v_depths[gi]) + float(v_depths[gj]))
+                            bias = 1e-4 * max(1.0, abs(e_depth))
+                            line = QLineF(float(px[gi]), float(py[gi]), float(px[gj]), float(py[gj]))
+                            draw_elements.append((e_depth - bias, 1, line, wire_pen))
 
-            # 3. Draw Points
+            # 3. Collect Points (Clean circular dots - Rhino conduit style)
             if self._preview_points:
-                pt_pen = QPen(QColor(86, 210, 255, 235), 2.0, Qt.PenStyle.SolidLine)
-                painter.setPen(pt_pen)
-                arm = 3.5
-                pt_lines = []
+                pt_pen = QPen(QColor(25, 30, 40, 220), 1.2)
+                pt_brush = QBrush(QColor(86, 210, 255, 240))
+                dot_r = 4.0
                 for k in range(len(self._preview_points)):
                     idx = pts_offset + k
                     if ok[idx]:
-                        x, y = float(px[idx]), float(py[idx])
-                        pt_lines.append(QLineF(x - arm, y, x + arm, y))
-                        pt_lines.append(QLineF(x, y - arm, x, y + arm))
-                if pt_lines:
-                    painter.drawLines(pt_lines)
+                        p_depth = float(v_depths[idx])
+                        bias = 2e-4 * max(1.0, abs(p_depth))
+                        pt = QPointF(float(px[idx]), float(py[idx]))
+                        draw_elements.append((p_depth - bias, 2, pt, pt_pen, pt_brush, dot_r))
+
+            if not draw_elements:
+                return
+
+            # Sort globally back-to-front (Painter's algorithm: largest depth drawn first)
+            draw_elements.sort(key=lambda item: item[0], reverse=True)
+
+            # Draw elements with state caching and line batching
+            current_pen = None
+            current_brush = None
+            pending_lines = []
+            pending_pen = None
+
+            def flush_lines():
+                nonlocal pending_lines, pending_pen, current_pen
+                if pending_lines:
+                    if current_pen != pending_pen:
+                        painter.setPen(pending_pen)
+                        current_pen = pending_pen
+                    painter.drawLines(pending_lines)
+                    pending_lines = []
+                    pending_pen = None
+
+            for elem in draw_elements:
+                kind = elem[1]
+                if kind == 1:
+                    # Edge
+                    _, _, line, pen = elem
+                    if pending_pen is not None and pending_pen != pen:
+                        flush_lines()
+                    pending_pen = pen
+                    pending_lines.append(line)
+                elif kind == 0:
+                    # Face
+                    flush_lines()
+                    _, _, poly, col = elem
+                    if current_pen is not None:
+                        painter.setPen(Qt.PenStyle.NoPen)
+                        current_pen = None
+                    if current_brush != col:
+                        painter.setBrush(col)
+                        current_brush = col
+                    painter.drawPolygon(poly)
+                elif kind == 2:
+                    # Point
+                    flush_lines()
+                    _, _, pt, pen, brush, dot_r = elem
+                    if current_pen != pen:
+                        painter.setPen(pen)
+                        current_pen = pen
+                    if current_brush != brush:
+                        painter.setBrush(brush)
+                        current_brush = brush
+                    painter.drawEllipse(pt, dot_r, dot_r)
+
+            flush_lines()
 
         except Exception as ex:
             import logging
@@ -737,6 +846,47 @@ class IngeTrazoSceneBridge:
             vp = getattr(self.app.window, "viewport", None)
         return vp
 
+    def update_all_viewports(self) -> None:
+        """Triggers a repaint across all active viewports (single and multi-view panes)."""
+        viewports_found = set()
+
+        # 1. Primary viewport from app
+        vp = self.viewport
+        if vp is not None:
+            viewports_found.add(vp)
+
+        # 2. Check window for split controller or child viewports
+        win = getattr(self.app, "_window", None) or getattr(self.app, "window", None)
+        if win is None and hasattr(self, "editor_widget") and self.editor_widget is not None:
+            try:
+                win = self.editor_widget.window()
+            except Exception:
+                pass
+
+        if win is not None:
+            ctrl = getattr(win, "_split_controller", None)
+            if ctrl is not None and hasattr(ctrl, "viewports"):
+                for v in ctrl.viewports:
+                    if v is not None:
+                        viewports_found.add(v)
+            if hasattr(win, "findChildren"):
+                try:
+                    from PySide6.QtWidgets import QWidget
+                    for child in win.findChildren(QWidget):
+                        if child.__class__.__name__ == "Viewport":
+                            viewports_found.add(child)
+                except Exception:
+                    pass
+
+        for v in viewports_found:
+            # Ensure overlay callback is registered on this viewport
+            if hasattr(v, "_ext_overlays") and self._draw_overlay not in v._ext_overlays:
+                v._ext_overlays.append(self._draw_overlay)
+            try:
+                v.update()
+            except Exception:
+                pass
+
     def _bump_viewport(self) -> None:
         """Triggers a viewport redraw without touching private attributes."""
         vp = self.viewport
@@ -747,26 +897,19 @@ class IngeTrazoSceneBridge:
                     notify()
                 except Exception:
                     pass
-            update_fn = getattr(vp, "update", None)
-            if callable(update_fn):
-                try:
-                    update_fn()
-                except Exception:
-                    pass
+        self.update_all_viewports()
 
     def on_nodes_selected(self, selected_node_ids: List[str]) -> None:
         """Highlights the geometry of currently selected canvas node(s) in the overlay."""
         self._selected_node_ids = set(selected_node_ids)
-        if self.viewport is not None and hasattr(self.viewport, "update"):
-            self.viewport.update()
+        self.update_all_viewports()
 
     def sanitize_scene_previews(self) -> None:
         """Removes any legacy preview groups loaded from older .igz files."""
         sc = self.scene
         if sc is not None and hasattr(sc, "groups"):
             sc.groups[:] = [g for g in sc.groups if not is_preview_group(g)]
-        if self.viewport is not None and hasattr(self.viewport, "update"):
-            self.viewport.update()
+        self.update_all_viewports()
 
     def is_editor_active(self) -> bool:
         """Determines whether the Node Editor tab/window is currently active to the user."""
@@ -794,8 +937,8 @@ class IngeTrazoSceneBridge:
         sc = self.scene
         if sc is not None and hasattr(sc, "groups"):
             sc.groups[:] = [g for g in sc.groups if not is_preview_group(g)]
-        if refresh and self.viewport is not None and hasattr(self.viewport, "update"):
-            self.viewport.update()
+        if refresh:
+            self.update_all_viewports()
 
     def set_live_sync(self, enabled: bool) -> None:
         self.live_sync = bool(enabled)
@@ -815,14 +958,12 @@ class IngeTrazoSceneBridge:
         if not self.live_sync or not self.is_editor_active():
             self._preview_meshes.clear()
             self._preview_points.clear()
-            if self.viewport is not None and hasattr(self.viewport, "update"):
-                self.viewport.update()
+            self.update_all_viewports()
             return
 
         self._preview_meshes = meshes
         self._preview_points = points
-        if self.viewport is not None and hasattr(self.viewport, "update"):
-            self.viewport.update()
+        self.update_all_viewports()
 
     def notify_graph_changed(self) -> None:
         """Schedules debounced saving of the current graph to the document data."""

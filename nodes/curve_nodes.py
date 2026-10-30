@@ -2272,30 +2272,11 @@ class ViewportCurveNodeBase(BaseNode):
         except ImportError:
             return "PySide6.QtGui not available"
 
-        def _make_handle_marker(rad: float = 0.08) -> Any:
-            m_obj = Mesh()
-            try:
-                v_pts = [
-                    QVector3D(rad, 0, 0), QVector3D(-rad, 0, 0),
-                    QVector3D(0, rad, 0), QVector3D(0, -rad, 0),
-                    QVector3D(0, 0, rad), QVector3D(0, 0, -rad),
-                ]
-                faces = [
-                    [v_pts[4], v_pts[0], v_pts[2]], [v_pts[4], v_pts[2], v_pts[1]],
-                    [v_pts[4], v_pts[1], v_pts[3]], [v_pts[4], v_pts[3], v_pts[0]],
-                    [v_pts[5], v_pts[2], v_pts[0]], [v_pts[5], v_pts[1], v_pts[2]],
-                    [v_pts[5], v_pts[3], v_pts[1]], [v_pts[5], v_pts[0], v_pts[3]],
-                ]
-                for f_pts in faces:
-                    m_obj.add_face(f_pts)
-            except Exception:
-                pass
-            return m_obj
-
         for i, p in enumerate(pts):
-            m = _make_handle_marker()
-            m._chunk_dirty = True
-            m._attrs_dirty = True
+            m = Mesh()
+            # No 3D polyhedron facets: points are rendered as smooth 2D circles in the conduit overlay (Rhino style)
+            m._chunk_dirty = False
+            m._attrs_dirty = False
 
             handle_name = f"CP {i + 1} ({self.title})"
             try:

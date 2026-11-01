@@ -9357,7 +9357,7 @@ class NodeEditorWidget(QWidget):
         self.btn_redo = QPushButton("↻")
         self.btn_redo.setToolTip(tr("Redo (Ctrl+Y)"))
 
-        # Canvas tools: Fit, Minimap, Pop out, Gumball, Reload
+        # Canvas tools: Fit, Minimap, Pop out, Reload
         self.btn_fit = QPushButton("🔎")
         self.btn_fit.setToolTip(tr("Fit all nodes in view (F)"))
 
@@ -9371,24 +9371,6 @@ class NodeEditorWidget(QWidget):
         self.btn_popout.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.btn_popout.customContextMenuRequested.connect(self._show_popout_menu)
 
-        self.btn_gumball = QPushButton()
-        gumball_icon_path = os.path.join(os.path.dirname(__file__), "icons", "dark" if is_dark else "light", "gumball.png")
-        if not os.path.exists(gumball_icon_path):
-            gumball_icon_path = os.path.join(os.path.dirname(__file__), "icons", "dark", "gumball.png")
-        if not os.path.exists(gumball_icon_path):
-            gumball_icon_path = os.path.expandvars(r"%APPDATA%\IngeTrazo\plugins\gumball\gumball.png")
-        if os.path.exists(gumball_icon_path):
-            self.btn_gumball.setIcon(QIcon(gumball_icon_path))
-            self.btn_gumball.setIconSize(QSize(20, 20))
-        else:
-            self.btn_gumball.setText("🎯")
-
-        self.btn_gumball.setToolTip(tr("Toggle 3D Viewport Gumball Manipulator (Alt+G)"))
-        self.btn_gumball.setCheckable(True)
-
-        ctrl = self._find_gumball_controller()
-        initial_gumball = getattr(ctrl, "enabled", True) if ctrl is not None else True
-        self.btn_gumball.setChecked(initial_gumball)
 
         self.btn_reload = QPushButton("🔄")
         self.btn_reload.setToolTip(tr("Reload Nodes catalog"))
@@ -9403,7 +9385,6 @@ class NodeEditorWidget(QWidget):
         side_layout.addWidget(self.btn_fit)
         side_layout.addWidget(self.btn_minimap)
         side_layout.addWidget(self.btn_popout)
-        side_layout.addWidget(self.btn_gumball)
         side_layout.addWidget(self.btn_reload)
         side_layout.addStretch(1)
 
@@ -9695,7 +9676,6 @@ class NodeEditorWidget(QWidget):
 
         self.btn_minimap.toggled.connect(self._toggle_minimap)
 
-        self.btn_gumball.toggled.connect(self._toggle_gumball)
 
         self.btn_lang.clicked.connect(self._open_language_menu)
         self.cmb_icon_size.currentIndexChanged.connect(
@@ -9720,67 +9700,10 @@ class NodeEditorWidget(QWidget):
 
 
 
-    def _find_gumball_controller(self) -> Optional[Any]:
-        # 1. From sys.modules known stems
-        for mod_name in ("ingetrazo_plugin_gumball", "gumball", "IngeTrazoGumball"):
-            mod = sys.modules.get(mod_name)
-            if mod and getattr(mod, "_GUMBALL_CONTROLLER", None) is not None:
-                return getattr(mod, "_GUMBALL_CONTROLLER")
-
-        # 2. Any module in sys.modules containing gumball in name
-        for k, mod in list(sys.modules.items()):
-            if "gumball" in k.lower():
-                ctrl = getattr(mod, "_GUMBALL_CONTROLLER", None)
-                if ctrl is not None:
-                    return ctrl
-
-        # 3. Main window
-        win = self.get_main_window()
-        if win is not None:
-            ctrl = getattr(win, "_gumball_controller", None)
-            if ctrl is not None:
-                return ctrl
-
-        # 4. Global QApplication instance
-        app = QApplication.instance()
-        if app is not None:
-            ctrl = getattr(app, "_gumball_controller", None)
-            if ctrl is not None:
-                return ctrl
-
-        return None
-
-    def _toggle_gumball(self, enabled: bool) -> None:
-        try:
-            ctrl = self._find_gumball_controller()
-            if ctrl is not None:
-                ctrl.set_enabled(enabled)
-            else:
-                win = self.get_main_window()
-                if win is not None:
-                    act = getattr(win, "_gumball_action", None)
-                    if act is not None:
-                        act.setChecked(enabled)
-                        tb = getattr(win, "_gumball_toolbar", None)
-                        if tb is not None:
-                            btn = tb.widgetForAction(act)
-                            if btn is not None:
-                                btn.setChecked(enabled)
-                                btn.update()
-        except Exception:
-            pass
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        try:
-            ctrl = self._find_gumball_controller()
-            if ctrl is not None and hasattr(self, "btn_gumball"):
-                if self.btn_gumball.isChecked() != ctrl.enabled:
-                    self.btn_gumball.blockSignals(True)
-                    self.btn_gumball.setChecked(ctrl.enabled)
-                    self.btn_gumball.blockSignals(False)
-        except Exception:
-            pass
+        pass
 
     def _toggle_minimap(self, visible: bool) -> None:
 
@@ -10366,11 +10289,6 @@ class NodeEditorWidget(QWidget):
 
             self.btn_minimap.setToolTip(tr("Toggle Overview Minimap"))
 
-        if hasattr(self, "btn_gumball"):
-
-            self.btn_gumball.setText("")
-
-            self.btn_gumball.setToolTip(tr("Toggle 3D Viewport Gumball Manipulator (Alt+G)"))
 
         if hasattr(self, "minimap") and self.minimap:
 

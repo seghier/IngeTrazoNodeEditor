@@ -834,6 +834,18 @@ class IngeTrazoSceneBridge:
 
     @property
     def scene(self) -> Any:
+        win = getattr(self.app, "_window", None) or getattr(self.app, "window", None)
+        if win is not None and isinstance(getattr(win, "_documents", None), list):
+            active_doc = getattr(win, "active_document", None)
+            doc = active_doc() if callable(active_doc) else getattr(win, "_doc", None)
+            if doc is not None and getattr(doc, "viewport", None) is not None:
+                sc = getattr(doc.viewport, "scene", None)
+                if sc is not None:
+                    return sc
+            if getattr(win, "viewport", None) is not None:
+                sc = getattr(win.viewport, "scene", None)
+                if sc is not None:
+                    return sc
         sc = getattr(self.app, "scene", None)
         if sc is None and hasattr(self.app, "window"):
             sc = getattr(self.app.window, "scene", None)
@@ -841,6 +853,14 @@ class IngeTrazoSceneBridge:
 
     @property
     def viewport(self) -> Any:
+        win = getattr(self.app, "_window", None) or getattr(self.app, "window", None)
+        if win is not None and isinstance(getattr(win, "_documents", None), list):
+            active_doc = getattr(win, "active_document", None)
+            doc = active_doc() if callable(active_doc) else getattr(win, "_doc", None)
+            if doc is not None and getattr(doc, "viewport", None) is not None:
+                return doc.viewport
+            if getattr(win, "viewport", None) is not None:
+                return win.viewport
         vp = getattr(self.app, "viewport", None)
         if vp is None and hasattr(self.app, "window"):
             vp = getattr(self.app.window, "viewport", None)
@@ -972,15 +992,29 @@ class IngeTrazoSceneBridge:
 
     def _commit_graph_to_doc_data(self) -> None:
         """Commits the current graph state into IngeTrazo's document data as one undo step."""
-        if not hasattr(self.app, "set_document_data"):
-            return
         graph_dict = self.engine.to_dict()
         try:
             import json
             graph_json = json.dumps(graph_dict, sort_keys=True)
             if graph_json != self.last_synced_doc_data:
                 self.last_synced_doc_data = graph_json
-                self.app.set_document_data(graph_dict)
+
+                # Resolve currently active document and its authoritative scene
+                win = getattr(self.app, "_window", None) or getattr(self.app, "window", None)
+                active_doc = getattr(win, "active_document", None) if (win is not None and isinstance(getattr(win, "_documents", None), list)) else None
+                doc = active_doc() if callable(active_doc) else (getattr(win, "_doc", None) if (win is not None and isinstance(getattr(win, "_documents", None), list)) else None)
+                doc_vp = getattr(doc, "viewport", None) if doc is not None else None
+                active_sc = getattr(doc_vp, "scene", None) if doc_vp is not None else self.scene
+
+                if hasattr(self.app, "set_document_data"):
+                    self.app.set_document_data(graph_dict)
+
+                # Ensure active document scene holds graph in plugin_data
+                if active_sc is not None:
+                    pdata = getattr(active_sc, "plugin_data", None)
+                    if pdata is None or not isinstance(pdata, dict):
+                        active_sc.plugin_data = {}
+                    active_sc.plugin_data["node_editor"] = graph_dict
         except Exception as ex:
             import logging
             logging.getLogger("ingetrazo.plugins").debug(f"Could not save graph to document data: {ex}")
@@ -988,7 +1022,17 @@ class IngeTrazoSceneBridge:
     def restore_graph_from_document(self) -> bool:
         """Restores the node graph from document data if present."""
         saved = None
-        if hasattr(self.app, "document_data"):
+        win = getattr(self.app, "_window", None) or getattr(self.app, "window", None)
+        active_doc = getattr(win, "active_document", None) if (win is not None and isinstance(getattr(win, "_documents", None), list)) else None
+        doc = active_doc() if callable(active_doc) else (getattr(win, "_doc", None) if (win is not None and isinstance(getattr(win, "_documents", None), list)) else None)
+        doc_vp = getattr(doc, "viewport", None) if doc is not None else None
+        active_sc = getattr(doc_vp, "scene", None) if doc_vp is not None else self.scene
+
+        if active_sc is not None:
+            pdata = getattr(active_sc, "plugin_data", {}) or {}
+            saved = pdata.get("node_editor", None)
+
+        if not saved and hasattr(self.app, "document_data"):
             try:
                 saved = self.app.document_data(default=None)
             except TypeError:
@@ -998,13 +1042,7 @@ class IngeTrazoSceneBridge:
                     saved = None
             except Exception:
                 saved = None
-        if not saved:
-            try:
-                sc = self.scene
-                pdata = getattr(sc, "plugin_data", {}) or {}
-                saved = pdata.get("node_editor", None)
-            except Exception:
-                saved = None
+
         if saved and isinstance(saved, dict) and "nodes" in saved and saved["nodes"]:
             try:
                 import json
@@ -1022,23 +1060,35 @@ class IngeTrazoSceneBridge:
 
     def on_document_changed(self) -> None:
         """
-        Called when IngeTrazo's document changes (an edit, an undo, New, Open).
+        Called when IngeTrazo's document changes (an edit, an undo, New, Open, tab switch).
         Safely guards against overwriting unsaved graph changes on normal scene edits:
         only reloads when the document's stored graph data genuinely changed from the outside.
         """
-        if not hasattr(self.app, "document_data"):
-            return
-        try:
-            saved = self.app.document_data(default=None)
-        except TypeError:
+        win = getattr(self.app, "_window", None) or getattr(self.app, "window", None)
+        active_doc = getattr(win, "active_document", None) if (win is not None and isinstance(getattr(win, "_documents", None), list)) else None
+        doc = active_doc() if callable(active_doc) else (getattr(win, "_doc", None) if (win is not None and isinstance(getattr(win, "_documents", None), list)) else None)
+        doc_vp = getattr(doc, "viewport", None) if doc is not None else None
+        active_sc = getattr(doc_vp, "scene", None) if doc_vp is not None else self.scene
+
+        saved = None
+        if active_sc is not None:
+            pdata = getattr(active_sc, "plugin_data", {}) or {}
+            saved = pdata.get("node_editor", None)
+
+        if not saved and hasattr(self.app, "document_data"):
             try:
-                saved = self.app.document_data()
+                saved = self.app.document_data(default=None)
+            except TypeError:
+                try:
+                    saved = self.app.document_data()
+                except Exception:
+                    saved = None
             except Exception:
                 saved = None
-        except Exception:
-            saved = None
+
         if not saved or not isinstance(saved, dict):
             return
+
         import json
         saved_json = json.dumps(saved, sort_keys=True)
         if saved_json == self.last_synced_doc_data:
